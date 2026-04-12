@@ -1,4 +1,4 @@
-# Interpreter — Live Speaker Translation
+# Distill — Live Speaker Translation
 
 A Chrome extension + FastAPI backend that translates live audio from web chat apps (Google Meet, Zoom, Discord, etc.) in real time. Hear everything in your native language, or route translated audio into the call.
 
@@ -36,7 +36,16 @@ flowchart LR
 
 ## Quick Start
 
-### 1. Backend
+If you just want to install and use Distill on your machine, do this:
+
+### 1. Clone the repo
+
+```bash
+git clone <your-repo-url>
+cd hackazona
+```
+
+### 2. Start the backend
 
 ```bash
 cd backend
@@ -45,12 +54,12 @@ uv sync
 uv run uvicorn main:app --reload --port 8000
 ```
 
-### 2. Extension
+### 3. Build the Chrome extension
 
 ```bash
 cd extension
-bun install
-bun run dev
+npm install
+npm run build
 ```
 
 Then load in Chrome:
@@ -60,7 +69,15 @@ Then load in Chrome:
 3. Click **Load unpacked** → select `extension/dist` folder
 4. Allow microphone permission when prompted (needed for device enumeration)
 
-### 3. Web Dashboard (Voice Profile & Clone Setup)
+### 4. Use it
+
+1. Open Google Meet, YouTube, or another supported tab
+2. Click the **Distill** extension icon
+3. Pick source and target language
+4. Choose your output device
+5. Click **Start Translation**
+
+### 5. Optional: Web dashboard for voice profile setup
 
 ```bash
 cd web
@@ -78,15 +95,6 @@ VITE_SERVER_URL=http://localhost:8000
 VITE_CONVEX_SITE_URL=<your Convex site URL>
 CONVEX_DEPLOYMENT=<your Convex deployment>
 ```
-
-### 4. Use It
-
-1. Open any web chat (Google Meet, YouTube, etc.)
-2. Click the Interpreter extension icon
-3. Pick source + target language
-4. Select an output device (speakers or BlackHole)
-5. Hit **Start Translation**
-6. Hear translated audio live 🎧
 
 Notes:
 

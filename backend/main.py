@@ -29,6 +29,7 @@ from services.azure_conversation_client import AzureConversationClient
 from services.azure_tts_client import AzureTtsClient
 from services.profile_store import init_db, get_profile, upsert_profile, update_voice_profile, set_voice_status, list_profiles
 from supermemory.client import SupermemorySession
+from supermemory.query import query_memories
 
 load_dotenv()
 
@@ -169,6 +170,14 @@ class VoiceStatusPayload(BaseModel):
     status: str
 
 
+class MemoryQueryPayload(BaseModel):
+    query: str
+    limit: int = 5
+    tab_url: str | None = None
+    container_tag: str | None = None
+    scope: str | None = None
+
+
 @app.get("/api/voice-profile")
 async def get_voice_profile(userId: str):
     """Lookup a user's voice profile by userId — mirrors the old Convex HTTP endpoint."""
@@ -218,6 +227,36 @@ async def api_set_voice_status(payload: VoiceStatusPayload):
     if not result:
         return JSONResponse({"error": "Profile not found"}, status_code=404)
     return result
+
+
+@app.post("/api/memories/query")
+async def api_query_memories(payload: MemoryQueryPayload):
+    query = payload.query.strip()
+    if not query:
+        return JSONResponse({"error": "Query is required"}, status_code=400)
+
+    try:
+        return await query_memories(
+            query,
+            limit=max(1, min(payload.limit, 8)),
+            tab_url=payload.tab_url,
+            container_tag=payload.container_tag,
+            scope=payload.scope,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Supermemory query failed with status %s", exc.response.status_code)
+        return JSONResponse(
+            {"error": "Supermemory query failed", "details": exc.response.text},
+            status_code=502,
+        )
+    except httpx.HTTPError as exc:
+        logger.exception("Supermemory query transport error")
+        return JSONResponse(
+            {"error": "Could not reach Supermemory", "details": str(exc)},
+            status_code=502,
+        )
 
 
 @app.websocket("/ws/translate")

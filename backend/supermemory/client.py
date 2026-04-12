@@ -70,10 +70,6 @@ def _extract_youtube_video_id(tab_url: str | None) -> str | None:
 
 
 def _build_custom_id(tab_url: str | None, session_id: str) -> str:
-    video_id = _extract_youtube_video_id(tab_url)
-    if video_id:
-        return f"youtube:{video_id}"
-
     return session_id
 
 
@@ -165,6 +161,7 @@ class SupermemorySession:
                 "sessionId": self.session_id,
                 "sessionStart": self._entries[0].ts,
                 "entryCount": len(self._entries),
+                **({"videoId": video_id} if video_id else {}),
                 **({"tabUrl": self.tab_url} if self.tab_url else {}),
                 **({"tabTitle": self.tab_title} if self.tab_title else {}),
             },

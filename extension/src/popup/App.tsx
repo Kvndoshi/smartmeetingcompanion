@@ -10,6 +10,7 @@ function formatDuration(seconds: number): string {
 }
 import { LANGUAGES } from "../utils/languages";
 import logo from "../logo.png";
+import MemoriesTab from "./MemoriesTab";
 
 interface TranscriptEntry {
   original: string;
@@ -27,6 +28,7 @@ type PickerMediaDevices = MediaDevices & {
 };
 
 type ExtStatus = "idle" | "connected" | "capturing" | "disconnected" | "error";
+type PopupTab = "translate" | "memories";
 const PICK_OUTPUT_OPTION_VALUE = "__pick_output_device__";
 
 /* ═══════════════════════════════════════════
@@ -81,6 +83,7 @@ const TranscriptIcon = () => (
    ═══════════════════════════════════════════ */
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<PopupTab>("translate");
   const [sourceLang, setSourceLang] = useState("en");
   const [targetLang, setTargetLang] = useState("es");
   const [status, setStatus] = useState<ExtStatus>("idle");
@@ -380,121 +383,144 @@ export default function App() {
       </div>
 
       <div className="content">
-        {/* Languages */}
-        <div>
-          <div className="section-label">Languages</div>
-          <div className="lang-section" style={{ marginTop: 6 }}>
-            <div className="lang-group">
-              <select
-                className="lang-select"
-                value={sourceLang}
-                onChange={(e) => {
-                  setSourceLang(e.target.value);
-                  chrome.storage.sync.set({ sourceLang: e.target.value });
-                }}
-                disabled={isCapturing}
-              >
-                {LANGUAGES.map((l) => (
-                  <option key={l.code} value={l.code}>{l.name}</option>
-                ))}
-              </select>
-            </div>
-
-            <button className="lang-swap" onClick={handleSwap} disabled={isCapturing} title="Swap languages">
-              <span>⇄</span>
-            </button>
-
-            <div className="lang-group">
-              <select
-                className="lang-select"
-                value={targetLang}
-                onChange={(e) => {
-                  setTargetLang(e.target.value);
-                  chrome.storage.sync.set({ targetLang: e.target.value });
-                }}
-                disabled={isCapturing}
-              >
-                {LANGUAGES.map((l) => (
-                  <option key={l.code} value={l.code}>{l.name}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* Output Device */}
-        <div className="output-section">
-          <div className="output-header">
-            <span className="section-label">
-              <SpeakerIcon />
-              Output
-            </span>
-            <button className="refresh-btn" onClick={refreshDevices} title="Refresh devices">
-              <RefreshIcon />
-            </button>
-          </div>
-          <select
-            className="output-select"
-            value={selectedDevice}
-            onChange={(e) => void handleDeviceChange(e.target.value)}
-            disabled={isCapturing}
+        <div className="tab-switcher" role="tablist" aria-label="Distill popup sections">
+          <button
+            className={`tab-switcher-btn ${activeTab === "translate" ? "active" : ""}`}
+            onClick={() => setActiveTab("translate")}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "translate"}
           >
-            <option value="">System Default</option>
-            {canPickOutputDevice && (
-              <option value={PICK_OUTPUT_OPTION_VALUE}>Choose Output Device…</option>
-            )}
-            {outputDevices.map((d) => (
-              <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
-            ))}
-          </select>
-          {selectedDevice && getSelectedDeviceLabel().toLowerCase().includes("blackhole") && (
-            <div className="device-hint success">BlackHole selected — set Meet mic to BlackHole too</div>
-          )}
-          {!selectedDevice && outputDevices.length > 0 && (
-            <div className="device-hint warning">Select BlackHole to route audio into a call</div>
-          )}
+            Translate
+          </button>
+          <button
+            className={`tab-switcher-btn ${activeTab === "memories" ? "active" : ""}`}
+            onClick={() => setActiveTab("memories")}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "memories"}
+          >
+            Memories
+          </button>
         </div>
 
-        {/* Action */}
-        <button
-          className={`action-btn ${isCapturing ? "stop" : "start"}`}
-          onClick={handleToggle}
-        >
-          <span className="btn-content">
-            {isCapturing ? <StopIcon /> : <PlayIcon />}
-            {isCapturing ? "Stop Translation" : "Start Translation"}
-          </span>
-        </button>
+        {activeTab === "translate" ? (
+          <>
+            <div>
+              <div className="section-label">Languages</div>
+              <div className="lang-section" style={{ marginTop: 6 }}>
+                <div className="lang-group">
+                  <select
+                    className="lang-select"
+                    value={sourceLang}
+                    onChange={(e) => {
+                      setSourceLang(e.target.value);
+                      chrome.storage.sync.set({ sourceLang: e.target.value });
+                    }}
+                    disabled={isCapturing}
+                  >
+                    {LANGUAGES.map((l) => (
+                      <option key={l.code} value={l.code}>{l.name}</option>
+                    ))}
+                  </select>
+                </div>
 
-        {/* Transcript */}
-        <div className="transcript-section">
-          <span className="section-label">
-            <TranscriptIcon />
-            Live Transcript
-          </span>
-          <div className="transcript-box" ref={transcriptRef}>
-            {transcripts.length === 0 && !currentOriginal && (
-              <div className="transcript-empty">
-                <WaveformBars active={false} />
-                <div>Translations will appear here</div>
+                <button className="lang-swap" onClick={handleSwap} disabled={isCapturing} title="Swap languages">
+                  <span>⇄</span>
+                </button>
+
+                <div className="lang-group">
+                  <select
+                    className="lang-select"
+                    value={targetLang}
+                    onChange={(e) => {
+                      setTargetLang(e.target.value);
+                      chrome.storage.sync.set({ targetLang: e.target.value });
+                    }}
+                    disabled={isCapturing}
+                  >
+                    {LANGUAGES.map((l) => (
+                      <option key={l.code} value={l.code}>{l.name}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
-            )}
-            {transcripts.map((t, i) => (
-              <div key={i} className="transcript-entry">
-                <div className="transcript-original">{t.original}</div>
-                <div className="transcript-translated">{t.translated}</div>
+            </div>
+
+            <div className="output-section">
+              <div className="output-header">
+                <span className="section-label">
+                  <SpeakerIcon />
+                  Output
+                </span>
+                <button className="refresh-btn" onClick={refreshDevices} title="Refresh devices">
+                  <RefreshIcon />
+                </button>
               </div>
-            ))}
-            {currentOriginal && (
-              <div className="transcript-entry">
-                <div className="transcript-original">{currentOriginal}</div>
-                {currentTranslated && (
-                  <div className="transcript-translated">{currentTranslated}</div>
+              <select
+                className="output-select"
+                value={selectedDevice}
+                onChange={(e) => void handleDeviceChange(e.target.value)}
+                disabled={isCapturing}
+              >
+                <option value="">System Default</option>
+                {canPickOutputDevice && (
+                  <option value={PICK_OUTPUT_OPTION_VALUE}>Choose Output Device…</option>
+                )}
+                {outputDevices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+                ))}
+              </select>
+              {selectedDevice && getSelectedDeviceLabel().toLowerCase().includes("blackhole") && (
+                <div className="device-hint success">BlackHole selected — set Meet mic to BlackHole too</div>
+              )}
+              {!selectedDevice && outputDevices.length > 0 && (
+                <div className="device-hint warning">Select BlackHole to route audio into a call</div>
+              )}
+            </div>
+
+            <button
+              className={`action-btn ${isCapturing ? "stop" : "start"}`}
+              onClick={handleToggle}
+            >
+              <span className="btn-content">
+                {isCapturing ? <StopIcon /> : <PlayIcon />}
+                {isCapturing ? "Stop Translation" : "Start Translation"}
+              </span>
+            </button>
+
+            <div className="transcript-section">
+              <span className="section-label">
+                <TranscriptIcon />
+                Live Transcript
+              </span>
+              <div className="transcript-box" ref={transcriptRef}>
+                {transcripts.length === 0 && !currentOriginal && (
+                  <div className="transcript-empty">
+                    <WaveformBars active={false} />
+                    <div>Translations will appear here</div>
+                  </div>
+                )}
+                {transcripts.map((t, i) => (
+                  <div key={i} className="transcript-entry">
+                    <div className="transcript-original">{t.original}</div>
+                    <div className="transcript-translated">{t.translated}</div>
+                  </div>
+                ))}
+                {currentOriginal && (
+                  <div className="transcript-entry">
+                    <div className="transcript-original">{currentOriginal}</div>
+                    {currentTranslated && (
+                      <div className="transcript-translated">{currentTranslated}</div>
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
-        </div>
+            </div>
+          </>
+        ) : (
+          <MemoriesTab />
+        )}
       </div>
     </div>
   );
