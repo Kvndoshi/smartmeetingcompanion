@@ -224,55 +224,36 @@ function stopEnabledMirror(): void {
 // plays smoothly without overlaps or gaps.
 let nextPlaybackTime = 0;
 
+// Azure TTS is configured server-side as Riff16Khz16BitMonoPcm. Azure streams
+// synthesis incrementally: the FIRST chunk carries the RIFF/WAVE header, but
+// subsequent chunks are raw Int16 PCM continuations with no header. So per
+// chunk we strip any RIFF preamble we find and treat the remainder as raw PCM.
+const TTS_SAMPLE_RATE = 16000;
+
 /**
- * Parse a WAV file header and return PCM metadata + raw sample data.
- * The backend sends 16kHz 16-bit mono PCM wrapped in a RIFF/WAVE container.
+ * If `bytes` begins with a RIFF/WAVE header, return the offset of the 'data'
+ * chunk payload. Otherwise return 0 (treat as raw PCM continuation).
  */
-function parseWav(bytes: Uint8Array): {
-  sampleRate: number;
-  numChannels: number;
-  bitsPerSample: number;
-  samples: Int16Array;
-} | null {
-  if (bytes.length < 44) return null;
-  // 'RIFF'
-  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return null;
-  // 'WAVE'
-  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) return null;
+function stripRiffHeader(bytes: Uint8Array): number {
+  if (bytes.length < 12) return 0;
+  // 'RIFF' ... 'WAVE'
+  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return 0;
+  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) return 0;
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-
-  // Walk chunks to find 'fmt ' and 'data'
   let offset = 12;
-  let sampleRate = 16000;
-  let numChannels = 1;
-  let bitsPerSample = 16;
-  let dataOffset = -1;
-  let dataSize = 0;
-
   while (offset + 8 <= bytes.length) {
-    const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+    const chunkId = String.fromCharCode(
+      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
+    );
     const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === 'fmt ') {
-      numChannels = view.getUint16(offset + 10, true);
-      sampleRate = view.getUint32(offset + 12, true);
-      bitsPerSample = view.getUint16(offset + 22, true);
-    } else if (chunkId === 'data') {
-      dataOffset = offset + 8;
-      dataSize = chunkSize;
-      break;
+    if (chunkId === 'data') {
+      return offset + 8;
     }
     offset += 8 + chunkSize;
   }
-
-  if (dataOffset < 0) return null;
-
-  const sampleCount = dataSize / 2; // 16-bit
-  const samples = new Int16Array(sampleCount);
-  for (let i = 0; i < sampleCount; i++) {
-    samples[i] = view.getInt16(dataOffset + i * 2, true);
-  }
-  return { sampleRate, numChannels, bitsPerSample, samples };
+  // Malformed header — skip standard 44-byte prefix as a fallback.
+  return 44;
 }
 
 function playTranslated(audioBytes: number[]): void {
@@ -282,36 +263,49 @@ function playTranslated(audioBytes: number[]): void {
   }
 
   const bytes = new Uint8Array(audioBytes);
-  const parsed = parseWav(bytes);
-  if (!parsed) {
-    console.error('[Interceptor] Failed to parse WAV data (length:', bytes.length, ')');
+  const pcmOffset = stripRiffHeader(bytes);
+  const pcmByteLength = bytes.length - pcmOffset;
+
+  if (pcmByteLength < 2) {
+    console.warn('[Interceptor] playTranslated: empty PCM payload');
     return;
   }
 
   try {
-    // Create an AudioBuffer at the source sample rate and fill with Float32 samples
-    const { sampleRate, samples } = parsed;
-    const frameCount = samples.length;
-    const buffer = audioCtx.createBuffer(1, frameCount, sampleRate);
+    // Read little-endian Int16 samples from the underlying buffer. Using a
+    // DataView handles non-aligned offsets that Int16Array would reject.
+    const view = new DataView(bytes.buffer, bytes.byteOffset + pcmOffset, pcmByteLength);
+    const frameCount = pcmByteLength >> 1;
+    const buffer = audioCtx.createBuffer(1, frameCount, TTS_SAMPLE_RATE);
     const channelData = buffer.getChannelData(0);
     for (let i = 0; i < frameCount; i++) {
-      channelData[i] = samples[i] / 32768;
+      channelData[i] = view.getInt16(i * 2, true) / 32768;
     }
 
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
     source.connect(destination);
 
-    // Schedule back-to-back to avoid overlap / gaps
+    // Schedule back-to-back so streamed chunks play as continuous speech.
     const now = audioCtx.currentTime;
     const startAt = Math.max(now, nextPlaybackTime);
     source.start(startAt);
     nextPlaybackTime = startAt + buffer.duration;
 
-    console.log('[Interceptor] Playing translated audio:', buffer.duration.toFixed(2), 's @', sampleRate, 'Hz');
+    console.log(
+      '[Interceptor] Playing translated chunk:',
+      buffer.duration.toFixed(2), 's',
+      pcmOffset > 0 ? '(RIFF header stripped)' : '(raw PCM)'
+    );
   } catch (err) {
-    console.error('[Interceptor] Manual WAV playback failed:', err);
+    console.error('[Interceptor] PCM playback failed:', err);
   }
+}
+
+// Reset the playback scheduler when the pipeline deactivates so stale
+// `nextPlaybackTime` from a previous session doesn't delay a new one.
+function resetPlaybackQueue(): void {
+  nextPlaybackTime = 0;
 }
 
 // ─── Find all audio senders across tracked peer connections ─────────────────
@@ -383,6 +377,7 @@ async function deactivate(): Promise<void> {
   }
 
   teardownPipeline();
+  resetPlaybackQueue();
 }
 
 // ─── RTCPeerConnection / RTCRtpSender patching ───────────────────────────────
