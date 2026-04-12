@@ -27,6 +27,7 @@ interface InterpreterMessage {
 let active = false;
 let realTrack: MediaStreamTrack | null = null;
 const senders = new Set<RTCRtpSender>();
+const peerConnections = new Set<RTCPeerConnection>();
 
 // Audio pipeline nodes
 let audioCtx: AudioContext | null = null;
@@ -39,8 +40,6 @@ let replacementTrack: MediaStreamTrack | null = null;
 let enabledObserverInterval: ReturnType<typeof setInterval> | null = null;
 
 // ─── Inline AudioWorklet (Blob URL) ──────────────────────────────────────────
-// Cannot reference chrome-extension:// URLs from the page's main world, so we
-// embed the processor as a Blob URL created at runtime.
 
 const WORKLET_CODE = `
 class PCMCaptureProcessor extends AudioWorkletProcessor {
@@ -171,7 +170,7 @@ async function setupPipeline(track: MediaStreamTrack): Promise<void> {
     startEnabledMirror(track);
 
     postOut({ type: 'interpreter-track-attached' });
-    console.log('[Interceptor] Audio pipeline ready');
+    console.log('[Interceptor] Audio pipeline ready, replacementTrack:', replacementTrack.id);
   } catch (err) {
     console.error('[Interceptor] Failed to set up audio pipeline — using passthrough:', err);
     teardownPipeline();
@@ -222,7 +221,10 @@ function stopEnabledMirror(): void {
 // ─── Translated audio playback ────────────────────────────────────────────────
 
 function playTranslated(audioBytes: number[]): void {
-  if (!audioCtx || !destination) return;
+  if (!audioCtx || !destination) {
+    console.warn('[Interceptor] playTranslated: no audioCtx or destination, dropping audio');
+    return;
+  }
 
   const bytes = new Uint8Array(audioBytes);
   const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -235,6 +237,7 @@ function playTranslated(audioBytes: number[]): void {
       source.buffer = decoded;
       source.connect(destination);
       source.start();
+      console.log('[Interceptor] Playing translated audio:', decoded.duration.toFixed(2), 's');
     },
     (err) => {
       console.error('[Interceptor] decodeAudioData failed:', err);
@@ -242,34 +245,68 @@ function playTranslated(audioBytes: number[]): void {
   );
 }
 
+// ─── Find all audio senders across tracked peer connections ─────────────────
+
+function discoverAudioSenders(): void {
+  for (const pc of peerConnections) {
+    try {
+      const pcSenders = pc.getSenders();
+      for (const sender of pcSenders) {
+        if (sender.track && sender.track.kind === 'audio') {
+          if (!senders.has(sender)) {
+            console.log('[Interceptor] Discovered audio sender via getSenders()');
+            senders.add(sender);
+            // If we don't have a realTrack yet, grab it from this sender
+            if (!realTrack) {
+              realTrack = sender.track;
+              console.log('[Interceptor] Captured realTrack from sender:', realTrack.label);
+            }
+          }
+        }
+      }
+    } catch {
+      // PC might be closed
+    }
+  }
+}
+
 // ─── Activate / Deactivate ────────────────────────────────────────────────────
 
 async function activate(): Promise<void> {
+  console.log('[Interceptor] Activating outgoing translation');
   active = true;
+
+  // Discover any senders we might have missed (e.g. from addTransceiver)
+  discoverAudioSenders();
 
   if (realTrack) {
     await setupPipeline(realTrack);
 
     if (replacementTrack) {
+      console.log('[Interceptor] Swapping', senders.size, 'sender(s) to replacement track');
       for (const sender of senders) {
         try {
-          _origReplaceTrack.call(sender, replacementTrack);
+          await _origReplaceTrack.call(sender, replacementTrack);
+          console.log('[Interceptor] replaceTrack succeeded on sender');
         } catch (err) {
           console.error('[Interceptor] replaceTrack (activate) failed:', err);
         }
       }
     }
+  } else {
+    console.warn('[Interceptor] No realTrack found yet — will intercept when Meet adds one');
   }
 }
 
-function deactivate(): void {
+async function deactivate(): Promise<void> {
+  console.log('[Interceptor] Deactivating outgoing translation');
   active = false;
 
   // Swap senders back to the real track before tearing down the pipeline
   if (realTrack) {
     for (const sender of senders) {
       try {
-        _origReplaceTrack.call(sender, realTrack);
+        await _origReplaceTrack.call(sender, realTrack);
       } catch (err) {
         console.error('[Interceptor] replaceTrack (deactivate) failed:', err);
       }
@@ -283,8 +320,23 @@ function deactivate(): void {
 // Patch immediately — before any page script (including Google Meet) runs.
 
 const _origAddTrack = RTCPeerConnection.prototype.addTrack;
+const _origAddTransceiver = RTCPeerConnection.prototype.addTransceiver;
 const _origReplaceTrack = RTCRtpSender.prototype.replaceTrack;
 
+// Track all peer connections for sender discovery
+const _origPCConstructor = window.RTCPeerConnection;
+// @ts-expect-error — overriding global constructor
+window.RTCPeerConnection = function (...args: ConstructorParameters<typeof RTCPeerConnection>): RTCPeerConnection {
+  const pc = new _origPCConstructor(...args);
+  peerConnections.add(pc);
+  console.log('[Interceptor] New RTCPeerConnection created, total:', peerConnections.size);
+  return pc;
+};
+window.RTCPeerConnection.prototype = _origPCConstructor.prototype;
+// Preserve static properties
+Object.setPrototypeOf(window.RTCPeerConnection, _origPCConstructor);
+
+// Patch addTrack
 RTCPeerConnection.prototype.addTrack = function (
   track: MediaStreamTrack,
   ...streams: MediaStream[]
@@ -293,30 +345,25 @@ RTCPeerConnection.prototype.addTrack = function (
     return _origAddTrack.call(this, track, ...streams);
   }
 
-  // Save the real mic track
+  console.log('[Interceptor] addTrack intercepted, audio track:', track.label);
   realTrack = track;
 
   let sender: RTCRtpSender;
 
   if (active && replacementTrack) {
-    // Pipeline already running — use replacement track
     sender = _origAddTrack.call(this, replacementTrack, ...streams);
   } else if (active && !replacementTrack) {
-    // Active but pipeline not yet ready — pass real track and set up async
     sender = _origAddTrack.call(this, track, ...streams);
     senders.add(sender);
     void setupPipeline(track).then(() => {
       if (active && replacementTrack) {
-        try {
-          _origReplaceTrack.call(sender, replacementTrack);
-        } catch (err) {
+        _origReplaceTrack.call(sender, replacementTrack).catch((err: Error) => {
           console.error('[Interceptor] async replaceTrack failed:', err);
-        }
+        });
       }
     });
     return sender;
   } else {
-    // Not active yet — pass real track through, save sender for later
     sender = _origAddTrack.call(this, track, ...streams);
   }
 
@@ -325,24 +372,76 @@ RTCPeerConnection.prototype.addTrack = function (
   return sender;
 };
 
+// Patch addTransceiver — Google Meet uses this instead of addTrack
+RTCPeerConnection.prototype.addTransceiver = function (
+  trackOrKind: MediaStreamTrack | string,
+  init?: RTCRtpTransceiverInit
+): RTCRtpTransceiver {
+  // Determine if this is an audio track being added
+  const isAudioTrack = trackOrKind instanceof MediaStreamTrack && trackOrKind.kind === 'audio';
+  const isAudioKind = typeof trackOrKind === 'string' && trackOrKind === 'audio';
+
+  if (!isAudioTrack) {
+    return _origAddTransceiver.call(this, trackOrKind, init);
+  }
+
+  const track = trackOrKind as MediaStreamTrack;
+  console.log('[Interceptor] addTransceiver intercepted, audio track:', track.label);
+  realTrack = track;
+
+  let transceiver: RTCRtpTransceiver;
+
+  if (active && replacementTrack) {
+    transceiver = _origAddTransceiver.call(this, replacementTrack, init);
+  } else if (active && !replacementTrack) {
+    transceiver = _origAddTransceiver.call(this, track, init);
+    senders.add(transceiver.sender);
+    void setupPipeline(track).then(() => {
+      if (active && replacementTrack) {
+        _origReplaceTrack.call(transceiver.sender, replacementTrack).catch((err: Error) => {
+          console.error('[Interceptor] async transceiver replaceTrack failed:', err);
+        });
+      }
+    });
+    return transceiver;
+  } else {
+    transceiver = _origAddTransceiver.call(this, track, init);
+  }
+
+  senders.add(transceiver.sender);
+  postOut({ type: 'interpreter-track-attached' });
+  return transceiver;
+};
+
+// Also handle addTransceiver('audio', {}) — kind string without a track
+// Meet might create a transceiver with just the kind, then set the track later via replaceTrack
+const _origAddTransceiverKind = RTCPeerConnection.prototype.addTransceiver;
+// We already patched addTransceiver above; for the string-kind case, senders are
+// captured via the RTCRtpSender.replaceTrack patch below when Meet assigns a real track.
+
+// Patch replaceTrack on RTCRtpSender
 RTCRtpSender.prototype.replaceTrack = function (
   newTrack: MediaStreamTrack | null
 ): Promise<void> {
   if (newTrack && newTrack.kind === 'audio') {
+    // Check if this is our own replacement call (avoid infinite loop)
+    if (newTrack === replacementTrack) {
+      return _origReplaceTrack.call(this, newTrack);
+    }
+
+    console.log('[Interceptor] replaceTrack intercepted, new audio track:', newTrack.label);
     realTrack = newTrack;
+    senders.add(this);
 
     if (active) {
       // Re-wire the pipeline with the new real track
       void setupPipeline(newTrack).then(() => {
         if (active && replacementTrack) {
-          try {
-            _origReplaceTrack.call(this, replacementTrack);
-          } catch (err) {
+          _origReplaceTrack.call(this, replacementTrack).catch((err: Error) => {
             console.error('[Interceptor] re-wire replaceTrack failed:', err);
-          }
+          });
         }
       });
-      // Return resolved promise — Meet doesn't need to wait for the async setup
       return Promise.resolve();
     }
   }
@@ -350,10 +449,32 @@ RTCRtpSender.prototype.replaceTrack = function (
   return _origReplaceTrack.call(this, newTrack);
 };
 
+// ─── getUserMedia override — catch the mic track early ──────────────────────
+// Meet calls getUserMedia to get the mic, then addTrack/addTransceiver.
+// Override getUserMedia to capture the mic track as early as possible.
+
+const _origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+
+navigator.mediaDevices.getUserMedia = async function (
+  constraints?: MediaStreamConstraints
+): Promise<MediaStream> {
+  const stream = await _origGetUserMedia(constraints);
+
+  // Check if this was an audio request
+  if (constraints?.audio) {
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length > 0) {
+      console.log('[Interceptor] getUserMedia returned audio track:', audioTracks[0].label);
+      realTrack = audioTracks[0];
+    }
+  }
+
+  return stream;
+};
+
 // ─── postMessage listener ─────────────────────────────────────────────────────
 
 window.addEventListener('message', (event: MessageEvent) => {
-  // Only handle messages from the same window tagged as interpreter-ext
   if (event.source !== window) return;
   const msg = event.data as InterpreterMessage;
   if (!msg || msg.source !== 'interpreter-ext') return;
@@ -364,7 +485,7 @@ window.addEventListener('message', (event: MessageEvent) => {
       break;
 
     case 'interpreter-deactivate':
-      deactivate();
+      void deactivate();
       break;
 
     case 'interpreter-translated-audio': {
@@ -380,4 +501,4 @@ window.addEventListener('message', (event: MessageEvent) => {
   }
 });
 
-console.log('[Interceptor] RTCPeerConnection and RTCRtpSender patched');
+console.log('[Interceptor] RTC patched: addTrack, addTransceiver, replaceTrack, getUserMedia');

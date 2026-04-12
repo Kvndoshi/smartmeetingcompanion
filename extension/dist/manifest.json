@@ -31,7 +31,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/meet-interceptor.ts-D8q6riz8.js"
+        "assets/meet-interceptor.ts-DXEo9VmS.js"
       ],
       "matches": [
         "https://meet.google.com/*"
@@ -64,7 +64,7 @@
         "https://meet.google.com/*"
       ],
       "resources": [
-        "assets/meet-interceptor.ts-D8q6riz8.js",
+        "assets/meet-interceptor.ts-DXEo9VmS.js",
         "assets/meet-bridge.ts-cTUY6hFW.js",
         "assets/languages-l3NF9G8N.js",
         "assets/meet-widget.ts-CUfG7FD6.js"

@@ -438,20 +438,35 @@ function disconnectMicBackend(): void {
 }
 
 // ── Mic Translation Start / Stop ──
-async function startMicTranslation(sourceLang: string, targetLang: string): Promise<void> {
+async function startMicTranslation(
+  sourceLang: string,
+  targetLang: string,
+  senderTabId?: number
+): Promise<void> {
   micState.sourceLang = sourceLang;
   micState.targetLang = targetLang;
+
+  // Resolve the Meet tab — use state.tabId if available, otherwise find it
+  let tabId = state.tabId;
+  if (!tabId) {
+    tabId = await resolveCaptureTabId(undefined, senderTabId);
+    if (tabId) {
+      state.tabId = tabId; // cache for later use
+    }
+  }
 
   // Connect to backend
   connectMicBackend();
 
   // Tell the bridge content script to activate the interceptor
-  if (state.tabId) {
-    chrome.tabs.sendMessage(state.tabId, {
+  if (tabId) {
+    chrome.tabs.sendMessage(tabId, {
       type: "mic-interceptor-activate",
     }).catch((err) => {
       console.error("[BG] Failed to activate mic interceptor:", err);
     });
+  } else {
+    console.error("[BG] No tab found for mic interceptor activation");
   }
 
   micState.isTranslating = true;
@@ -558,7 +573,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "start-mic-translation": {
-      startMicTranslation(message.sourceLang, message.targetLang)
+      const micSenderTabId = sender.tab?.id;
+      startMicTranslation(message.sourceLang, message.targetLang, micSenderTabId)
         .then(() => sendResponse({ success: true }))
         .catch((e) => sendResponse({ success: false, error: e.message }));
       return true;
