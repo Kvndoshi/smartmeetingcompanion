@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -51,6 +51,30 @@ def _is_youtube_watch_url(url: str | None) -> bool:
 
     host = parsed.netloc.lower()
     return host.endswith("youtube.com") and parsed.path == "/watch"
+
+
+def _extract_youtube_video_id(tab_url: str | None) -> str | None:
+    if not _is_youtube_watch_url(tab_url):
+        return None
+
+    try:
+        parsed = urlparse(tab_url or "")
+        video_id = parse_qs(parsed.query).get("v", [""])[0].strip()
+    except ValueError:
+        return None
+
+    if video_id:
+        return video_id
+
+    return None
+
+
+def _build_custom_id(tab_url: str | None, session_id: str) -> str:
+    video_id = _extract_youtube_video_id(tab_url)
+    if video_id:
+        return f"youtube:{video_id}"
+
+    return session_id
 
 
 class SupermemorySession:
@@ -122,11 +146,13 @@ class SupermemorySession:
             logger.warning("[Supermemory] %s", e)
             return None
 
-        custom_id = self.tab_url if _is_youtube_watch_url(self.tab_url) else self.session_id
+        video_id = _extract_youtube_video_id(self.tab_url)
+        container_tag = video_id or SUPERMEMORY_CONTAINER_TAG
+        custom_id = _build_custom_id(self.tab_url, self.session_id)
 
         payload = {
             "content": self._build_document(),
-            "containerTag": SUPERMEMORY_CONTAINER_TAG,
+            "containerTag": container_tag,
             "customId": custom_id,
             "entityContext": (
                 "Live translation sessions captured by the Interpreter Chrome extension. "
@@ -157,7 +183,7 @@ class SupermemorySession:
                 result = response.json()
                 logger.info(
                     "[Supermemory] Session saved → container=%s  customId=%s  id=%s  status=%s",
-                    SUPERMEMORY_CONTAINER_TAG, custom_id, result.get("id"), result.get("status"),
+                    container_tag, custom_id, result.get("id"), result.get("status"),
                 )
                 return result
             else:

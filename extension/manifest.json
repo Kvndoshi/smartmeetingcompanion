@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Interpreter — Live Translation",
+  "name": "Distill — Live Translation",
   "description": "Real-time speaker translation for web chat apps. Hear everything in your native tongue.",
   "version": "1.0.0",
   "icons": {
@@ -10,7 +10,7 @@
   },
   "action": {
     "default_popup": "src/popup/index.html",
-    "default_title": "Interpreter",
+    "default_title": "Distill",
     "default_icon": {
       "16": "public/icon16.png",
       "48": "public/icon48.png",

@@ -9,6 +9,7 @@ function formatDuration(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 import { LANGUAGES } from "../utils/languages";
+import logo from "../logo.png";
 
 interface TranscriptEntry {
   original: string;
@@ -32,14 +33,6 @@ const PICK_OUTPUT_OPTION_VALUE = "__pick_output_device__";
    SVG Icon Components
    ═══════════════════════════════════════════ */
 
-const GlobeIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="10" />
-    <path d="M2 12h20" />
-    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-  </svg>
-);
-
 const WaveformBars = ({ active }: { active: boolean }) => (
   <svg viewBox="0 0 32 20" fill="currentColor" className={`waveform-svg ${active ? "waveform-active" : ""}`}>
     <rect className="wf-bar" x="3" y="6" width="3" height="8" rx="1.5" />
@@ -47,14 +40,6 @@ const WaveformBars = ({ active }: { active: boolean }) => (
     <rect className="wf-bar" x="14" y="1" width="3" height="18" rx="1.5" />
     <rect className="wf-bar" x="19.5" y="4" width="3" height="12" rx="1.5" />
     <rect className="wf-bar" x="25" y="6.5" width="3" height="7" rx="1.5" />
-  </svg>
-);
-
-const SwapIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M7 16l-4-4 4-4" />
-    <path d="M17 8l4 4-4 4" />
-    <path d="M3 12h18" />
   </svg>
 );
 
@@ -85,13 +70,6 @@ const RefreshIcon = () => (
   </svg>
 );
 
-const GearIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  </svg>
-);
-
 const TranscriptIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -110,16 +88,12 @@ export default function App() {
   const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
   const [currentOriginal, setCurrentOriginal] = useState("");
   const [currentTranslated, setCurrentTranslated] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [theme, setTheme] = useState<"dark" | "light">("light");
 
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState("");
 
-  const [speechmaticsKey, setSpeechmaticsKey] = useState("");
-  const [minimaxKey, setMinimaxKey] = useState("");
-  const [minimaxGroupId, setMinimaxGroupId] = useState("");
-  const [backendUrl, setBackendUrl] = useState("ws://localhost:8000");
   const canPickOutputDevice =
     typeof (navigator.mediaDevices as PickerMediaDevices).selectAudioOutput === "function";
 
@@ -129,13 +103,11 @@ export default function App() {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const selectedDeviceRef = useRef("");
 
-  // Duration timer — driven by background's captureStartedAt
   useEffect(() => {
     if (!isCapturing || !captureStartedAtRef.current) {
       setElapsed(0);
       return;
     }
-    // compute immediately so we don't wait 1s on popup reopen
     setElapsed(Math.floor((Date.now() - captureStartedAtRef.current) / 1000));
     const id = setInterval(() => {
       if (captureStartedAtRef.current) {
@@ -210,14 +182,10 @@ export default function App() {
 
   useEffect(() => {
     chrome.storage.sync.get(
-      ["sourceLang", "targetLang", "speechmaticsKey", "minimaxKey", "minimaxGroupId", "backendUrl", "outputDeviceId"],
+      ["sourceLang", "targetLang", "outputDeviceId"],
       (data) => {
         if (data.sourceLang) setSourceLang(data.sourceLang);
         if (data.targetLang) setTargetLang(data.targetLang);
-        if (data.speechmaticsKey) setSpeechmaticsKey(data.speechmaticsKey);
-        if (data.minimaxKey) setMinimaxKey(data.minimaxKey);
-        if (data.minimaxGroupId) setMinimaxGroupId(data.minimaxGroupId);
-        if (data.backendUrl) setBackendUrl(data.backendUrl);
         if (data.outputDeviceId) {
           selectedDeviceRef.current = data.outputDeviceId;
           setSelectedDevice(data.outputDeviceId);
@@ -367,19 +335,6 @@ export default function App() {
     chrome.storage.sync.set({ sourceLang: targetLang, targetLang: sourceLang });
   };
 
-  const handleSaveSettings = () => {
-    chrome.storage.sync.set({
-      sourceLang,
-      targetLang,
-      speechmaticsKey,
-      minimaxKey,
-      minimaxGroupId,
-      backendUrl,
-      outputDeviceId: selectedDevice,
-    });
-    setShowSettings(false);
-  };
-
   const getStatusText = (): string => {
     switch (status) {
       case "idle": return "Ready";
@@ -397,19 +352,22 @@ export default function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${theme}`}>
       {/* Header */}
       <div className="header">
         <div className="header-logo">
-          <GlobeIcon />
+          <img src={logo} alt="Distill logo" className="header-logo-image" />
         </div>
         <div className="header-text">
-          <div className="header-title">Interpreter</div>
+          <div className="header-title">Distill</div>
           <div className="header-subtitle">Live Translation</div>
         </div>
         {isCapturing && (
           <span className="header-timer">{formatDuration(elapsed)}</span>
         )}
+        <button className="theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
+          {theme === "dark" ? "☀︎" : "◗"}
+        </button>
         <div className={`header-waveform ${isCapturing ? "active" : ""}`}>
           <WaveformBars active={isCapturing} />
         </div>
@@ -443,7 +401,7 @@ export default function App() {
             </div>
 
             <button className="lang-swap" onClick={handleSwap} disabled={isCapturing} title="Swap languages">
-              <SwapIcon />
+              <span>⇄</span>
             </button>
 
             <div className="lang-group">
@@ -537,69 +495,7 @@ export default function App() {
             )}
           </div>
         </div>
-
-        <div className="divider" />
-
-        {/* Settings Toggle */}
-        <button
-          className={`settings-toggle ${showSettings ? "open" : ""}`}
-          onClick={() => setShowSettings(!showSettings)}
-        >
-          <GearIcon />
-          {showSettings ? "Hide Settings" : "Settings"}
-        </button>
-
-        {/* Settings Panel */}
-        {showSettings && (
-          <div className="settings-panel">
-            <div className="settings-group">
-              <label>Speechmatics API Key</label>
-              <input
-                className="settings-input"
-                type="password"
-                placeholder="Enter key..."
-                value={speechmaticsKey}
-                onChange={(e) => setSpeechmaticsKey(e.target.value)}
-              />
-            </div>
-            <div className="settings-group">
-              <label>MiniMax API Key</label>
-              <input
-                className="settings-input"
-                type="password"
-                placeholder="Enter key..."
-                value={minimaxKey}
-                onChange={(e) => setMinimaxKey(e.target.value)}
-              />
-            </div>
-            <div className="settings-group">
-              <label>MiniMax Group ID</label>
-              <input
-                className="settings-input"
-                type="text"
-                placeholder="Optional"
-                value={minimaxGroupId}
-                onChange={(e) => setMinimaxGroupId(e.target.value)}
-              />
-            </div>
-            <div className="settings-group">
-              <label>Backend URL</label>
-              <input
-                className="settings-input"
-                type="text"
-                value={backendUrl}
-                onChange={(e) => setBackendUrl(e.target.value)}
-              />
-            </div>
-            <button className="settings-save" onClick={handleSaveSettings}>
-              Save Settings
-            </button>
-          </div>
-        )}
       </div>
-
-      {/* Footer */}
-      <div className="footer">Speechmatics + MiniMax</div>
     </div>
   );
 }

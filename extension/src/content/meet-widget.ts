@@ -543,7 +543,7 @@ class InterpreterWidget {
     const logo = this.el("div", "p-logo");
     logo.innerHTML = SVG_GLOBE;
     const title = this.el("span", "p-title");
-    title.textContent = "Interpreter";
+    title.textContent = "Distill";
 
     this.waveformEl = this.el("div", "p-waveform");
     this.waveformEl.innerHTML = SVG_WAVEFORM;
