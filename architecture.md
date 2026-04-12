@@ -1,6 +1,6 @@
-# Interpreter — Architecture
+# Distill — Architecture
 
-Current end-to-end data flow from tab audio capture to translated playback.
+End-to-end data flow from tab audio capture to translated playback.
 
 ## High-Level Flow
 
@@ -8,13 +8,13 @@ Current end-to-end data flow from tab audio capture to translated playback.
 flowchart LR
     A["Tab Audio (Google Meet/YouTube/etc.)"] --> B["Chrome Extension Offscreen Capture"]
     B --> C["Extension Service Worker"]
-    C --> D["FastAPI WebSocket Backend"]
-    D --> E["Speechmatics RT (STT + Translation)"]
-    D --> F["TTS Provider"]
+    C -->|"ws://localhost:8000/ws/translate"| D["FastAPI WebSocket Backend"]
+    D --> E["Azure STT + Translation"]
+    D --> F["Azure Speech Synthesis (TTS)"]
     F --> G["Translated Audio Bytes"]
     G --> C
     C --> H["Offscreen Playback + setSinkId"]
-    H --> I["BlackHole 2ch or Speakers"]
+    H --> I["Selected Output Device"]
 ```
 
 ## Detailed Sequence
@@ -25,9 +25,8 @@ sequenceDiagram
     participant OFS as extension/src/offscreen/offscreen.ts
     participant BG as extension/src/background.ts
     participant API as backend/main.py
-    participant SM as backend/services/speechmatics_client.py
-    participant MM as backend/services/minimax_client.py
-    participant SMTTS as backend/services/speechmatics_tts_client.py
+    participant AZ_STT as AzureTranslationClient / AzureConversationClient
+    participant AZ_TTS as backend/services/azure_tts_client.py
 
     Note over BG,OFS: Start Translation
     BG->>OFS: start-capture {streamId, outputDeviceId}
@@ -37,56 +36,70 @@ sequenceDiagram
     loop Audio chunks
         OFS->>BG: audio-data (Int16 PCM bytes)
         BG->>API: websocket binary send
-        API->>SM: send_audio(bytes)
+        API->>AZ_STT: send_audio(bytes)
     end
 
-    Note over SM,API: Speechmatics realtime recognition + translation
-    SM-->>API: AddPartialTranscript / AddTranscript
-    API-->>BG: transcript messages
-    SM-->>API: AddPartialTranslation / AddTranslation
-    API-->>BG: translated_text_partial / translated_text
+    Note over AZ_STT,API: Azure Speech recognition + translation
+    AZ_STT-->>API: recognized + translated text
+    API-->>BG: transcript + translated_text messages
 
-    Note over API: Final translated text enters low-latency queue
-    alt TTS_PROVIDER=minimax
-        API->>MM: text_to_speech(translated_text, target_lang)
-        MM-->>API: audio bytes (MP3)
-    else TTS_PROVIDER=speechmatics
-        API->>SMTTS: text_to_speech(translated_text, target_lang)
-        SMTTS-->>API: audio bytes (WAV/PCM preview endpoint)
-        Note right of API: If unsupported language/no audio, fallback to MiniMax TTS
-    end
+    Note over API: Final translated text enters TTS queue
+    API->>AZ_TTS: synthesize(translated_text, target_lang)
+    AZ_TTS-->>API: translated audio bytes
 
     API-->>BG: websocket binary audio
     BG->>OFS: translated-audio (byte array)
-    OFS->>OFS: detect MIME (WAV vs MP3), AudioElement.play()
+    OFS->>OFS: detect MIME, AudioElement.play()
     OFS->>OFS: setSinkId(selected output device)
 ```
 
 ## Runtime Controls (`backend/.env`)
 
-- `USE_SPEECHMATICS_TRANSLATION=1`
-  - `1`: use Speechmatics RT translation events.
-  - `0`: fallback to MiniMax text translation pipeline.
+- `STT_PROVIDER`
+  - `azure` (default): uses `AzureTranslationClient` or `AzureConversationClient` depending on mode.
+  - `speechmatics`: uses Speechmatics RT as alternative STT + translation path.
 
-- `TTS_PROVIDER=minimax|speechmatics`
-  - `minimax` default, multilingual.
-  - `speechmatics` preview test option (English-focused).
+- `TTS_PROVIDER`
+  - `azure` (default): uses Azure Speech Synthesis via `AzureTtsClient`.
+  - `minimax`: uses MiniMax TTS as alternative.
+  - `speechmatics`: preview test option.
 
-- `SPEECHMATICS_MAX_DELAY`
-  - lower value reduces transcript finalization delay.
+- `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`
+  - required for the live Azure STT and TTS path.
 
-- `TRANSLATION_TRIGGER_CHAR_THRESHOLD`, `TRANSLATION_PARTIAL_MIN_DELTA_CHARS`, `TRANSLATION_PARTIAL_MIN_INTERVAL_MS`
-  - used primarily when running MiniMax text translation mode.
+- `SPEECHMATICS_API_KEY`
+  - required when using Speechmatics as STT or TTS provider.
+
+- `MINIMAX_API_KEY`
+  - required when using MiniMax as TTS provider.
+
+- `TRANSLATION_TRIGGER_CHAR_THRESHOLD`, `AZURE_SEGMENTATION_SILENCE_MS`, `SPEECHMATICS_MAX_DELAY`
+  - tuning parameters for translation timing and segmentation.
+
+## Profiles and Storage
+
+User profiles are managed by the backend and stored locally in SQLite. The storage layer lives in `backend/services/profile_store.py`. Relevant API routes:
+
+- `GET /api/profiles`
+- `POST /api/profiles`
+- `GET /api/voice-profile`
+- `POST /api/voice-profile`
+- `PATCH /api/voice-status`
 
 ## Key Files
 
 - Extension capture/playback:
-  - `/Users/xiao/interpreter/extension/src/offscreen/offscreen.ts`
-  - `/Users/xiao/interpreter/extension/src/background.ts`
+  - `extension/src/offscreen/offscreen.ts`
+  - `extension/src/background.ts`
 - Backend orchestrator:
-  - `/Users/xiao/interpreter/backend/main.py`
-- Provider clients:
-  - `/Users/xiao/interpreter/backend/services/speechmatics_client.py`
-  - `/Users/xiao/interpreter/backend/services/minimax_client.py`
-  - `/Users/xiao/interpreter/backend/services/speechmatics_tts_client.py`
-
+  - `backend/main.py`
+- Azure provider clients:
+  - `backend/services/azure_translation_client.py`
+  - `backend/services/azure_conversation_client.py`
+  - `backend/services/azure_tts_client.py`
+- Alternative provider clients:
+  - `backend/services/speechmatics_client.py`
+  - `backend/services/speechmatics_tts_client.py`
+  - `backend/services/minimax_client.py`
+- Profile storage:
+  - `backend/services/profile_store.py`

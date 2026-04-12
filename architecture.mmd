@@ -1,0 +1,51 @@
+flowchart TB
+    subgraph Chrome["Chrome Browser"]
+        TAB["🎙️ Tab Audio<br/>Google Meet / YouTube"]
+        EXT["🔌 Chrome Extension<br/>(popup + service worker)"]
+        OFS["🔈 Offscreen Document<br/>Audio capture + playback"]
+        OUT["🎧 Selected Output Device"]
+    end
+
+    subgraph Backend["FastAPI Backend (localhost:8000)"]
+        WS["WebSocket Endpoint<br/>/ws/translate"]
+        DASH["Dashboard<br/>/"]
+        HEALTH["Health Check<br/>/health"]
+        PROFILES["Profile API<br/>/api/profiles<br/>/api/voice-profile"]
+        DB[("SQLite<br/>profiles.db")]
+
+        WS --> STT_SEL{{"STT_PROVIDER"}}
+        STT_SEL -->|"azure<br/>(default)"| AZ_STT
+        STT_SEL -->|"speechmatics"| SM_STT
+
+        WS --> TTS_SEL{{"TTS_PROVIDER"}}
+        TTS_SEL -->|"azure<br/>(default)"| AZ_TTS
+        TTS_SEL -->|"minimax"| MM_TTS
+        TTS_SEL -->|"speechmatics"| SM_TTS
+    end
+
+    subgraph Azure["Azure Speech Services"]
+        AZ_STT["AzureTranslationClient<br/>or<br/>AzureConversationClient"]
+        AZ_TTS["AzureTtsClient<br/>Speech Synthesis"]
+    end
+
+    subgraph AltProviders["Alternative Providers"]
+        SM_STT["Speechmatics RT<br/>STT + Translation"]
+        MM_TTS["MiniMax TTS"]
+        SM_TTS["Speechmatics TTS"]
+    end
+
+    TAB -->|"audio stream"| OFS
+    OFS -->|"PCM 16k<br/>audio chunks"| EXT
+    EXT -->|"WebSocket<br/>binary send"| WS
+
+    AZ_STT -->|"recognized +<br/>translated text"| WS
+    AZ_TTS -->|"translated<br/>audio bytes"| WS
+    SM_STT -->|"transcript +<br/>translation"| WS
+    MM_TTS -->|"audio bytes"| WS
+    SM_TTS -->|"audio bytes"| WS
+
+    WS -->|"websocket<br/>binary audio"| EXT
+    EXT -->|"translated-audio"| OFS
+    OFS -->|"setSinkId<br/>playback"| OUT
+
+    PROFILES --> DB
