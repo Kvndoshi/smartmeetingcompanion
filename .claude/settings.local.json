@@ -1,0 +1,69 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.1",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1",
+    "ANTHROPIC_AUTH_TOKEN": "9f940a2dc49044acae0a854c685e2773.iYW23aGhUZ1VxKu4",
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "API_TIMEOUT_MS": "3000000"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python -c:*)",
+      "Bash(node --check:*)",
+      "Bash(dir:*)",
+      "Bash(node -e \"JSON.parse\\(require\\(''fs''\\).readFileSync\\(''manifest.json'',''utf8''\\)\\); console.log\\(''manifest.json OK''\\)\")",
+      "Skill(claude-supermemory:super-save)",
+      "Bash(node:*)",
+      "Skill(claude-supermemory:super-search)",
+      "Bash(git -C \"C:\\\\Users\\\\kevin\\\\vscode_files\\\\shipping_products\\\\browser_extension\" log --oneline -10)",
+      "Bash(git -C \"C:\\\\Users\\\\kevin\\\\vscode_files\\\\shipping_products\\\\browser_extension\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\kevin\\\\vscode_files\\\\shipping_products\\\\browser_extension\" show a4705a4 --stat)",
+      "Bash(git checkout:*)",
+      "Bash(find:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(grep:*)",
+      "WebSearch",
+      "mcp__ide__getDiagnostics",
+      "Bash(del \"C:\\\\Users\\\\kevin\\\\vscode_files\\\\shipping_products\\\\browser_extension\\\\plan.md\")",
+      "Bash(pip freeze:*)",
+      "Bash(curl:*)",
+      "Bash(gcloud run services logs read:*)",
+      "Bash(findstr:*)",
+      "WebFetch(domain:docs.supermemory.ai)",
+      "WebFetch(domain:supermemory.ai)",
+      "Bash(pip show:*)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:python.langchain.com)",
+      "WebFetch(domain:docs.langchain.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:cookbook.openai.com)",
+      "WebFetch(domain:developers.openai.com)",
+      "WebFetch(domain:help.openai.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.promptingguide.ai)",
+      "WebFetch(domain:api.python.langchain.com)",
+      "WebFetch(domain:community.openai.com)",
+      "Bash(python3:*)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(claude mcp:*)",
+      "mcp__shadcn__search_items_in_registries",
+      "mcp__shadcn__get_item_examples_from_registries",
+      "mcp__shadcn__get_project_registries",
+      "WebFetch(domain:docs.cloud.google.com)",
+      "mcp__shadcn__list_items_in_registries",
+      "mcp__shadcn__view_items_in_registries"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "enabledMcpjsonServers": [
+    "shadcn"
+  ],
+  "enabledPlugins": {
+    "claude-supermemory@supermemory-plugins": true
+  }
+}

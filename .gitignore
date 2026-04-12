@@ -5,7 +5,7 @@ __pycache__/
 backend/.venv/
 
 # Build output
-extension/dist/
+# extension/dist/ is tracked so the extension is loadable without a build step
 
 # Environment
 backend/.env
