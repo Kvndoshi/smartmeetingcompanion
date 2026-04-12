@@ -50,7 +50,7 @@
     },
     {
       "js": [
-        "assets/meet-widget.ts-loader-D8MBqMY9.js"
+        "assets/meet-widget.ts-loader-CK9LAizE.js"
       ],
       "matches": [
         "https://meet.google.com/*"
@@ -67,7 +67,7 @@
         "assets/meet-interceptor.ts-BNYcZX2T.js",
         "assets/meet-bridge.ts-cTUY6hFW.js",
         "assets/languages-l3NF9G8N.js",
-        "assets/meet-widget.ts-CcXzAVV6.js"
+        "assets/meet-widget.ts-CrFwJlkz.js"
       ],
       "use_dynamic_url": false
     }

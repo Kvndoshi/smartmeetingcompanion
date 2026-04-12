@@ -22,60 +22,65 @@ const STATUS_LABELS: Record<WidgetStatus, string> = {
    CSS (injected into shadow DOM)
    ═══════════════════════════════════════════ */
 const WIDGET_CSS = `
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap");
 
 :host {
   all: initial;
-  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-family: "Outfit", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  --bg: #1e1e24;
-  --surface: #262630;
-  --elevated: #2e2e3a;
-  --hover: #363642;
-  --border: #444450;
-  --border-a: #5a5a68;
-  --text: #fafafa;
-  --text2: #c8c8d0;
-  --muted: #8888a0;
-  --amber: #f0c674;
-  --amber-dim: rgba(240,198,116,0.15);
-  --amber-glow: rgba(240,198,116,0.35);
-  --green: #86efac;
-  --green-dim: rgba(134,239,172,0.12);
-  --red: #fca5a5;
-  --red-dim: rgba(252,165,165,0.12);
-  --r: 12px;
-  --rs: 8px;
+  --ios-blue: #007aff;
+  --ios-blue-pressed: #0063d1;
+  --ios-blue-glow: rgba(0, 122, 255, 0.35);
+  --glass-1: rgba(28, 28, 30, 0.80);
+  --glass-2: rgba(38, 38, 42, 0.88);
+  --glass-3: rgba(52, 52, 58, 0.94);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-border-focus: rgba(0, 122, 255, 0.55);
+  --text: rgba(255, 255, 255, 0.95);
+  --text2: rgba(255, 255, 255, 0.60);
+  --muted: rgba(255, 255, 255, 0.34);
+  --label: rgba(255, 255, 255, 0.42);
+  --amber: #ff9f0a;
+  --amber-dim: rgba(255, 159, 10, 0.15);
+  --green: #30d158;
+  --green-dim: rgba(48, 209, 88, 0.15);
+  --red: #ff453a;
+  --red-dim: rgba(255, 69, 58, 0.14);
+  --r: 18px;
+  --rs: 10px;
+  --blur: blur(24px) saturate(180%);
 }
 
 *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* ── FAB (minimized) ── */
 .fab {
-  width: 48px;
-  height: 48px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: linear-gradient(160deg, var(--glass-3) 0%, var(--glass-1) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all 0.3s ease;
   position: relative;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.20);
 }
 
 .fab:hover {
-  border-color: var(--border-a);
+  border-color: rgba(255,255,255,0.24);
   transform: scale(1.08);
-  box-shadow: 0 6px 32px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.1);
+  box-shadow: 0 12px 36px rgba(0,0,0,0.40), inset 0 1px 0 rgba(255,255,255,0.24);
 }
 
 .fab svg {
-  width: 20px;
-  height: 20px;
-  color: var(--amber);
+  width: 21px;
+  height: 21px;
+  color: var(--ios-blue);
 }
 
 .fab-dot {
@@ -86,11 +91,11 @@ const WIDGET_CSS = `
   height: 8px;
   border-radius: 50%;
   background: var(--muted);
-  border: 2px solid var(--bg);
+  border: 2px solid rgba(22, 22, 24, 0.92);
 }
 
 .fab-dot.capturing {
-  background: var(--amber);
+  background: var(--ios-blue);
   animation: fpulse 2s ease-in-out infinite;
 }
 
@@ -104,11 +109,13 @@ const WIDGET_CSS = `
 
 /* ── Panel (expanded) ── */
 .panel {
-  width: 310px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: 0 8px 48px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.08);
+  width: 330px;
+  background: linear-gradient(180deg, rgba(34, 34, 38, 0.96) 0%, rgba(24, 24, 28, 0.94) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 22px;
+  box-shadow: 0 18px 56px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.16);
   overflow: hidden;
   animation: panel-in 0.25s ease;
 }
@@ -122,47 +129,63 @@ const WIDGET_CSS = `
 .p-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 16px 10px;
+  gap: 11px;
+  padding: 18px 16px 12px;
 }
 
 .p-logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--amber-dim), transparent);
-  border: 1px solid var(--border);
+  width: 34px;
+  height: 34px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
 
-.p-logo svg { width: 14px; height: 14px; color: var(--amber); }
+.p-logo svg { width: 18px; height: 18px; color: var(--ios-blue); }
+
+.p-title-wrap {
+  flex: 1;
+  min-width: 0;
+}
 
 .p-title {
-  flex: 1;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text);
-  letter-spacing: -0.3px;
+  letter-spacing: -0.4px;
+  line-height: 1.12;
+}
+
+.p-subtitle {
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
 }
 
 .p-waveform {
-  width: 32px;
-  height: 16px;
+  width: 34px;
+  height: 18px;
   color: var(--muted);
   transition: color 0.4s;
 }
 
-.p-waveform.active { color: var(--amber); }
+.p-waveform.active { color: var(--ios-blue); }
 
 .p-minimize {
-  width: 24px;
-  height: 24px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  background: var(--glass-1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
   color: var(--muted);
   cursor: pointer;
   display: flex;
@@ -175,7 +198,8 @@ const WIDGET_CSS = `
 
 .p-minimize:hover {
   color: var(--text2);
-  border-color: var(--border-a);
+  background: var(--glass-2);
+  border-color: rgba(255,255,255,0.2);
 }
 
 /* status */
@@ -183,8 +207,15 @@ const WIDGET_CSS = `
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 16px;
-  font-size: 11px;
+  padding: 8px 13px;
+  margin: 0 12px;
+  background: linear-gradient(135deg, var(--glass-2) 0%, var(--glass-1) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.18);
+  font-size: 11.5px;
   color: var(--text2);
   font-weight: 500;
 }
@@ -195,56 +226,78 @@ const WIDGET_CSS = `
   border-radius: 50%;
   background: var(--muted);
   flex-shrink: 0;
+  position: relative;
+}
+
+.s-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: transparent;
 }
 
 .s-dot.capturing {
-  background: var(--amber);
+  background: var(--ios-blue);
   animation: fpulse 2s ease-in-out infinite;
 }
 
+.s-dot.capturing::after {
+  background: var(--ios-blue-glow);
+}
+
 .s-dot.connected { background: var(--green); }
+.s-dot.connected::after { background: var(--green-dim); }
 .s-dot.error, .s-dot.disconnected { background: var(--red); }
+.s-dot.error::after, .s-dot.disconnected::after { background: var(--red-dim); }
 
 /* body */
 .p-body {
-  padding: 8px 16px 16px;
+  padding: 12px 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 /* languages */
 .langs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   overflow: hidden;
+  padding: 3px;
+  background: linear-gradient(145deg, var(--glass-3) 0%, var(--glass-1) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.18);
 }
 
 .langs select {
   flex: 1;
   min-width: 0;
-  padding: 7px 24px 7px 9px;
-  background: var(--elevated);
-  border: 1px solid var(--border);
+  padding: 9px 28px 9px 12px;
+  background: transparent;
+  border: none;
   border-radius: var(--rs);
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' fill='%235a5a65' viewBox='0 0 16 16'%3E%3Cpath d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 16 10'%3E%3Cpath d='M1 1l7 7 7-7' stroke='rgba(255,255,255,0.35)' stroke-width='2' stroke-linecap='round' fill='none'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 8px center;
-  transition: border-color 0.2s;
+  background-position: right 10px center;
+  transition: background 0.2s;
 }
 
 .langs select:focus {
   outline: none;
-  border-color: var(--border-a);
+  background-color: var(--glass-2);
 }
 
 .langs select:disabled {
@@ -252,12 +305,17 @@ const WIDGET_CSS = `
   cursor: not-allowed;
 }
 
+.langs select option {
+  background: #2c2c2e;
+  color: var(--text);
+}
+
 .swap-btn {
-  width: 26px;
-  height: 26px;
-  background: var(--elevated);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  background: var(--glass-2);
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
   color: var(--muted);
   cursor: pointer;
   display: flex;
@@ -271,7 +329,8 @@ const WIDGET_CSS = `
 
 .swap-btn:hover {
   color: var(--text2);
-  border-color: var(--border-a);
+  background: var(--glass-3);
+  border-color: rgba(255,255,255,0.22);
 }
 
 .swap-btn:hover svg { transform: rotate(180deg); }
@@ -280,14 +339,14 @@ const WIDGET_CSS = `
 /* action button */
 .action-btn {
   width: 100%;
-  padding: 10px;
+  padding: 13px 14px;
   border: none;
-  border-radius: 10px;
-  font-size: 12.5px;
+  border-radius: 999px;
+  font-size: 13.5px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -297,60 +356,70 @@ const WIDGET_CSS = `
 .action-btn svg { width: 13px; height: 13px; }
 
 .action-btn.start {
-  background: var(--amber);
-  color: #09090b;
+  background: linear-gradient(160deg, #3395ff 0%, #007aff 50%, #005ecb 100%);
+  color: #ffffff;
+  box-shadow: 0 4px 20px var(--ios-blue-glow), inset 0 1px 0 rgba(255,255,255,0.22);
 }
 
 .action-btn.start:hover {
-  box-shadow: 0 4px 20px var(--amber-glow);
-  transform: translateY(-1px);
+  box-shadow: 0 6px 28px rgba(0, 122, 255, 0.45);
+  opacity: 0.94;
 }
 
 .action-btn.stop {
-  background: var(--elevated);
+  background: linear-gradient(160deg, var(--glass-3) 0%, var(--glass-1) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.16);
 }
 
 .action-btn.stop:hover {
-  background: var(--hover);
-  border-color: var(--border-a);
+  background: var(--glass-3);
+}
+
+.action-btn:active {
+  transform: scale(0.98);
 }
 
 /* transcript */
 .transcript {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: linear-gradient(160deg, var(--glass-2) 0%, rgba(0,0,0,0.10) 100%);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-border);
   border-radius: var(--rs);
-  padding: 10px;
-  max-height: 120px;
-  min-height: 48px;
+  padding: 12px 13px;
+  max-height: 150px;
+  min-height: 60px;
   overflow-y: auto;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.6;
   color: var(--text2);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.14);
 }
 
 .transcript::-webkit-scrollbar { width: 3px; }
-.transcript::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
 
 .t-entry {
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
   animation: tup 0.3s ease;
 }
 
 .t-entry:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
 
-.t-orig { color: var(--muted); font-size: 10px; font-style: italic; margin-bottom: 2px; }
-.t-trans { color: var(--text); font-weight: 500; font-size: 11.5px; }
+.t-orig { color: var(--muted); font-size: 10.5px; font-style: italic; margin-bottom: 3px; }
+.t-trans { color: var(--text); font-weight: 500; font-size: 12.5px; }
 
 .t-empty {
   color: var(--muted);
   text-align: center;
-  padding: 10px 0;
-  font-size: 10.5px;
+  padding: 18px 0;
+  font-size: 11px;
 }
 
 @keyframes tup {
@@ -393,9 +462,9 @@ const WIDGET_CSS = `
 
 /* ── Mic Translation Button ── */
 .action-btn.mic-start {
-  background: var(--surface);
+  background: linear-gradient(160deg, var(--glass-3) 0%, var(--glass-1) 100%);
   color: var(--amber);
-  border: 1px solid var(--amber-dim);
+  border: 1px solid rgba(255, 159, 10, 0.18);
   margin-top: 6px;
 }
 
@@ -409,10 +478,11 @@ const WIDGET_CSS = `
   color: var(--amber);
   border: 1px solid var(--amber);
   margin-top: 6px;
+  box-shadow: none;
 }
 
 .action-btn.mic-stop:hover {
-  background: var(--elevated);
+  background: rgba(255, 159, 10, 0.20);
 }
 
 /* Mic status row */
@@ -420,7 +490,7 @@ const WIDGET_CSS = `
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 2px 16px 6px;
+  padding: 4px 16px 0;
   font-size: 10px;
   color: var(--text2);
   font-weight: 500;
@@ -431,7 +501,7 @@ const WIDGET_CSS = `
   font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
   color: var(--amber);
   margin-bottom: 2px;
 }
@@ -542,8 +612,12 @@ class InterpreterWidget {
     const header = this.el("div", "p-header");
     const logo = this.el("div", "p-logo");
     logo.innerHTML = SVG_GLOBE;
+    const titleWrap = this.el("div", "p-title-wrap");
     const title = this.el("span", "p-title");
     title.textContent = "Distill";
+    const subtitle = this.el("div", "p-subtitle");
+    subtitle.textContent = "Live Translation";
+    titleWrap.append(title, subtitle);
 
     this.waveformEl = this.el("div", "p-waveform");
     this.waveformEl.innerHTML = SVG_WAVEFORM;
@@ -552,7 +626,7 @@ class InterpreterWidget {
     minBtn.innerHTML = SVG_MINUS;
     minBtn.addEventListener("click", () => this.toggleExpand());
 
-    header.append(logo, title, this.waveformEl, minBtn);
+    header.append(logo, titleWrap, this.waveformEl, minBtn);
 
     // Status
     const statusRow = this.el("div", "p-status");
