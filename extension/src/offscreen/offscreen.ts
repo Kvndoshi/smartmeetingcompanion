@@ -312,12 +312,49 @@ async function playUsingAudioElement(
   console.log("[Offscreen] Audio element play() started");
 }
 
+/**
+ * Parse a RIFF/WAVE header and return the sample rate and data payload
+ * slice. If the buffer is not a WAV, return null and let the caller assume
+ * the backend-default 16 kHz raw PCM.
+ */
+function parseWavHeader(bytes: Uint8Array): {
+  sampleRate: number;
+  dataOffset: number;
+  dataSize: number;
+} | null {
+  if (bytes.length < 12) return null;
+  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return null;
+  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) return null;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 12;
+  let sampleRate = 16000;
+  let dataOffset = -1;
+  let dataSize = 0;
+
+  while (offset + 8 <= bytes.length) {
+    const chunkId = String.fromCharCode(
+      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
+    );
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === "fmt ") {
+      sampleRate = view.getUint32(offset + 12, true);
+    } else if (chunkId === "data") {
+      dataOffset = offset + 8;
+      dataSize = Math.min(chunkSize, bytes.length - dataOffset);
+      break;
+    }
+    offset += 8 + chunkSize;
+  }
+  if (dataOffset < 0) return null;
+  return { sampleRate, dataOffset, dataSize };
+}
+
 async function playUsingAudioContextFallback(
   bytes: Uint8Array,
   generation: number
 ): Promise<void> {
   try {
-    // Fallback path for non-MP3 payloads.
     if (!playbackContext || playbackContext.state === "closed") {
       playbackContext = new AudioContext();
     }
@@ -326,9 +363,24 @@ async function playUsingAudioContextFallback(
       await playbackContext.resume();
     }
 
-    const float32 = new Float32Array(bytes.length / 2);
-    const view = new DataView(bytes.buffer);
-    for (let i = 0; i < float32.length; i++) {
+    // Detect WAV wrapper and use the declared sample rate + data range.
+    // Without this, a hard-coded rate (e.g. 24000) would mismatch Azure's
+    // Riff16Khz16BitMonoPcm output and play audio at 1.5× speed — the
+    // infamous "mouse voice" bug.
+    const parsed = parseWavHeader(bytes);
+    const sampleRate = parsed ? parsed.sampleRate : 16000;
+    const pcmOffset = parsed ? parsed.dataOffset : 0;
+    const pcmByteLength = parsed ? parsed.dataSize : bytes.length;
+
+    if (pcmByteLength < 2) {
+      console.warn("[Offscreen] Fallback: empty PCM payload");
+      return;
+    }
+
+    const frameCount = pcmByteLength >> 1;
+    const float32 = new Float32Array(frameCount);
+    const view = new DataView(bytes.buffer, bytes.byteOffset + pcmOffset, pcmByteLength);
+    for (let i = 0; i < frameCount; i++) {
       float32[i] = view.getInt16(i * 2, true) / 32768;
     }
     if (generation !== playbackGeneration) return;
@@ -343,7 +395,7 @@ async function playUsingAudioContextFallback(
       fallbackSource = null;
     }
 
-    const buffer = playbackContext.createBuffer(1, float32.length, 24000);
+    const buffer = playbackContext.createBuffer(1, frameCount, sampleRate);
     buffer.getChannelData(0).set(float32);
     const source = playbackContext.createBufferSource();
     source.buffer = buffer;
@@ -355,26 +407,96 @@ async function playUsingAudioContextFallback(
       }
     };
     source.start();
+    console.log(
+      "[Offscreen] Fallback playing %d samples @ %d Hz (%.2fs)",
+      frameCount, sampleRate, frameCount / sampleRate
+    );
   } catch (err) {
     console.error("[Offscreen] Playback fallback error:", err);
   }
 }
 
 // ── Play Translated Audio (routes to selected output device) ──
-function playTranslatedAudio(audioData: number[]): void {
-  console.log(
-    "[Offscreen] Playing translated audio (%d bytes)",
-    audioData.length
-  );
-  const bytes = new Uint8Array(audioData);
+//
+// We queue incoming audio chunks and play them sequentially. This is
+// required because the backend now streams translated text to TTS in
+// ~5-word pieces: each piece arrives as its own audio message, and if
+// we played them with `playbackGeneration` cancellation, every new
+// chunk would cut off the previous one. The queue plays back-to-back
+// so the user hears a continuous translated utterance.
+const playbackQueue: Uint8Array[] = [];
+let playbackBusy = false;
+
+async function playNextInQueue(): Promise<void> {
+  if (playbackBusy) return;
+  const bytes = playbackQueue.shift();
+  if (!bytes) return;
+
+  playbackBusy = true;
   const generation = ++playbackGeneration;
-  void playUsingAudioElement(bytes, generation).catch(async (err) => {
+
+  // Attach a one-shot "done" handler that advances the queue. The
+  // HTMLAudioElement emits `ended` on successful completion; `error`
+  // fires on decode failure (in which case we fall back to the
+  // AudioContext PCM path, which triggers its own `onended`).
+  const element = getPlaybackElement();
+  const onDone = () => {
+    element.removeEventListener("ended", onDone);
+    element.removeEventListener("error", onDone);
+    playbackBusy = false;
+    // Advance. Schedule on a microtask so multiple chunks don't
+    // recurse deeply when arriving in quick succession.
+    queueMicrotask(() => {
+      void playNextInQueue();
+    });
+  };
+  element.addEventListener("ended", onDone);
+  element.addEventListener("error", onDone);
+
+  try {
+    await playUsingAudioElement(bytes, generation);
+  } catch (err) {
     console.warn(
       "[Offscreen] Audio element playback failed; trying PCM fallback:",
       err
     );
+    element.removeEventListener("ended", onDone);
+    element.removeEventListener("error", onDone);
     await playUsingAudioContextFallback(bytes, generation);
-  });
+    // The fallback path uses AudioBufferSourceNode whose `onended`
+    // callback we hook inside playUsingAudioContextFallback. Here we
+    // advance manually once the fallback source finishes — we attach a
+    // temporary onended chaining handler.
+    const fallback = fallbackSource;
+    if (fallback) {
+      const prevOnEnded = fallback.onended;
+      fallback.onended = (ev: Event) => {
+        if (typeof prevOnEnded === "function") {
+          prevOnEnded.call(fallback, ev);
+        }
+        playbackBusy = false;
+        queueMicrotask(() => {
+          void playNextInQueue();
+        });
+      };
+    } else {
+      // No fallback source — unblock immediately.
+      playbackBusy = false;
+      queueMicrotask(() => {
+        void playNextInQueue();
+      });
+    }
+  }
+}
+
+function playTranslatedAudio(audioData: number[]): void {
+  console.log(
+    "[Offscreen] Enqueue translated audio (%d bytes, queue=%d)",
+    audioData.length,
+    playbackQueue.length + 1
+  );
+  playbackQueue.push(new Uint8Array(audioData));
+  void playNextInQueue();
 }
 
 // ── Message Listener ──

@@ -457,14 +457,60 @@ async def websocket_translate(ws: WebSocket):
                 "message": str(e),
             })
 
+    def _chunk_for_tts(text: str, words_per_chunk: int = 5) -> list[str]:
+        """Split `text` into TTS-sized pieces of ~N words each.
+
+        Prefers breaking at punctuation (., !, ?, ,, ;, :) when a
+        punctuation token lands within two words of the target boundary,
+        so chunks follow natural prosody. Short inputs (<= N words) are
+        returned as a single chunk so we don't add chunk-boundary
+        artifacts to already-short utterances.
+        """
+        words = text.split()
+        if len(words) <= words_per_chunk:
+            return [text.strip()] if text.strip() else []
+
+        punct = (".", "!", "?", ",", ";", ":", "。", "！", "？", "，", "、")
+        chunks: list[str] = []
+        i = 0
+        while i < len(words):
+            target_end = min(i + words_per_chunk, len(words))
+            end = target_end
+            # Look for a nearby punctuation boundary to avoid splitting
+            # mid-clause. Scan a small window around the target.
+            for j in range(max(i, target_end - 2), min(len(words), target_end + 2)):
+                if words[j].rstrip().endswith(punct):
+                    end = j + 1
+                    break
+            if end <= i:
+                end = min(i + words_per_chunk, len(words))
+            piece = " ".join(words[i:end]).strip()
+            if piece:
+                chunks.append(piece)
+            i = end
+        return chunks
+
     async def speak_translated_text(translated_text: str):
-        """Generate and stream TTS audio from already-translated text."""
+        """Generate and stream TTS audio from already-translated text.
+
+        Long utterances are split into ~5-word chunks and synthesized
+        sequentially. Each chunk is sent as its own binary WebSocket
+        message, so the client starts playing the first words while the
+        rest are still being synthesized — cutting first-audio latency.
+        """
         if not connection_open or not translated_text.strip():
             return
 
         try:
             logger.info("[Translate] → %s", translated_text)
-            await synthesize_tts_streaming(translated_text)
+            chunks = _chunk_for_tts(translated_text, words_per_chunk=5)
+            if not chunks:
+                return
+            for idx, chunk in enumerate(chunks, start=1):
+                if not connection_open:
+                    break
+                logger.info("[TTS] chunk %d/%d: %s", idx, len(chunks), chunk[:60])
+                await synthesize_tts_streaming(chunk)
         except Exception as e:
             logger.error("TTS error: %s", e)
             await safe_send_json({
