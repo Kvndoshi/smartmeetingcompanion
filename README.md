@@ -1,58 +1,62 @@
 # Distill — Live Speaker Translation
 
-A Chrome extension + FastAPI backend that translates live audio from web chat apps (Google Meet, Zoom, Discord, etc.) in real time. Hear everything in your native language, or route translated audio into the call.
+Distill is a local-first live translation setup made of a Chrome extension and a FastAPI backend. The extension captures tab audio, streams it to the backend over WebSocket, and plays translated audio back through your selected output device.
+
+## Current Project Shape
+
+- `backend/` is the active server. It handles translation sessions, settings, and profile storage.
+- `extension/` is the active Chrome extension you load into Chrome.
+- User profiles are stored locally in SQLite at `backend/profiles.db`.
+- `web/` still contains older prototype assets and Convex-related code, but it is not part of the current local setup documented here.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph ext ["Chrome Extension (MV3)"]
-        A["Tab Audio\n(tabCapture)"] --> B["Offscreen Doc\n(PCM extract)"]
-        B --> C["Service Worker\n(orchestrator)"]
-        G["Translated Audio"] --> C
-        C --> H["Offscreen Playback\n(selected output device)"]
-        H --> I["BlackHole / Speakers"]
-    end
-
-    subgraph web ["Web Dashboard"]
-        J["Sign In\n(Clerk Auth)"] --> K["Profile Setup\n(language, name)"]
-        K --> L["Voice Warmup\n(record & clone)"]
-    end
-
-    C -- WebSocket --> D["FastAPI Backend"]
-    D --> E["Speechmatics STT\n+ RT Translation"]
-    E --> F["TTS Provider\n(MiniMax / Speechmatics)"]
-    F --> G
-    L -- "Voice profile" --> M["Convex DB"]
-    D -- "Lookup voice profile" --> M
-```
-
-**Audio routing flow:**
-
-| Route                  | What happens                                                        |
-| ---------------------- | ------------------------------------------------------------------- |
-| **Speakers (default)** | You hear the translated audio locally                               |
-| **BlackHole → Meet**   | Translated audio is routed into the call as your "microphone" input |
+1. The extension captures tab audio in Chrome.
+2. Audio is streamed to `ws://localhost:8000/ws/translate`.
+3. The backend uses either `AzureTranslationClient` or `AzureConversationClient` for the STT path, depending on `STT_PROVIDER`.
+4. The backend produces translated text from the incoming speech.
+5. In the live extension flow, translated speech is synthesized with `AzureTtsClient`.
+6. Translated audio is streamed back to the extension for playback.
+7. The extension plays the translated audio through the selected output device.
 
 ## Quick Start
 
-If you just want to install and use Distill on your machine, do this:
-
-### 1. Clone the repo
-
-```bash
-git clone <your-repo-url>
-cd hackazona
-```
-
-### 2. Start the backend
+### 1. Start the backend
 
 ```bash
 cd backend
-cp .env.example .env    # Add your API keys
+cp .env.example .env
 uv sync
 uv run uvicorn main:app --reload --port 8000
 ```
+
+Once the backend is running:
+
+- Health check: `http://localhost:8000/health`
+- Local dashboard: `http://localhost:8000/`
+
+### 2. Add your API keys
+
+Edit `backend/.env` and set the keys required for the path you are running.
+
+For the current live Azure path:
+
+- `AZURE_SPEECH_KEY`
+- `AZURE_SPEECH_REGION`
+
+Other keys used elsewhere in the backend:
+
+- `SPEECHMATICS_API_KEY`
+- `MINIMAX_API_KEY`
+- `SUPERMEMORY_API_KEY`
+
+The backend also reads provider and tuning settings such as:
+
+- `STT_PROVIDER`
+- `TTS_PROVIDER`
+- `TRANSLATION_TRIGGER_CHAR_THRESHOLD`
+- `AZURE_SEGMENTATION_SILENCE_MS`
+- `SPEECHMATICS_MAX_DELAY`
 
 ### 3. Build the Chrome extension
 
@@ -62,136 +66,47 @@ npm install
 npm run build
 ```
 
-Then load in Chrome:
+Then load it in Chrome:
 
-1. Go to `chrome://extensions`
-2. Enable **Developer Mode**
-3. Click **Load unpacked** → select `extension/dist` folder
-4. Allow microphone permission when prompted (needed for device enumeration)
+1. Open `chrome://extensions`
+2. Enable `Developer mode`
+3. Click `Load unpacked`
+4. Select `extension/dist`
 
 ### 4. Use it
 
-1. Open Google Meet, YouTube, or another supported tab
-2. Click the **Distill** extension icon
-3. Pick source and target language
-4. Choose your output device
-5. Click **Start Translation**
+1. Open a tab with audio, such as Google Meet or YouTube
+2. Click the Distill extension icon
+3. Choose source and target language
+4. Choose an output device
+5. Start translation
 
-### 5. Optional: Web dashboard for voice profile setup
+## Audio Routing
 
-```bash
-cd web
-npm install
-npx convex dev          # Start Convex dev server (needs CONVEX_DEPLOYMENT in .env.local)
-npm run dev             # Starts on http://localhost:5174
-```
+Translated audio plays through the output device selected in the extension.
 
-The web dashboard requires a `.env.local` file with:
+## Profiles And Storage
 
-```env
-VITE_CONVEX_URL=<your Convex deployment URL>
-VITE_CLERK_PUBLISHABLE_KEY=<your Clerk publishable key>
-VITE_SERVER_URL=http://localhost:8000
-VITE_CONVEX_SITE_URL=<your Convex site URL>
-CONVEX_DEPLOYMENT=<your Convex deployment>
-```
+Profiles are managed by the backend and stored locally in SQLite. The relevant API routes are:
 
-Notes:
+- `GET /api/profiles`
+- `POST /api/profiles`
+- `GET /api/voice-profile`
+- `POST /api/voice-profile`
+- `PATCH /api/voice-status`
 
-- Original tab audio passthrough is disabled in offscreen capture, so you should not hear untranslated + translated from the extension at the same time.
-- If output is set to BlackHole 2ch, local speakers are silent by design unless you monitor with a Multi-Output device.
+The storage layer lives in `backend/services/profile_store.py`.
 
-## Web Dashboard (Voice Profile & Cloning)
+## Notes
 
-The web dashboard (`web/`) is a React app for managing user profiles and voice cloning. It lets users:
-
-- **Sign in** via Clerk authentication
-- **Set a display name and preferred language**
-- **Record a voice sample** and create a MiniMax voice clone
-
-When voice cloning is enabled, the backend looks up the speaker's voice profile from Convex during translation so listeners hear translated speech rendered in the original speaker's cloned voice.
-
-**Stack:** React 18, Vite, Convex (database + file storage), Clerk (auth)
-
-**How it connects:**
-
-1. User signs in and creates a profile on the web dashboard.
-2. User records a voice sample; the app uploads it to Convex storage and sends it to MiniMax to create a voice clone (`voiceProfileId`).
-3. During a live call, the backend queries the Convex HTTP endpoint (`GET /api/voice-profile?userId=...`) to fetch the speaker's `voiceProfileId`.
-4. If a valid profile exists, TTS renders in the cloned voice; otherwise it falls back to a standard voice.
-
-## BlackHole Setup (Route Audio into Calls)
-
-To let other meeting participants hear the translated audio:
-
-### Install BlackHole
-
-```bash
-brew install blackhole-2ch
-```
-
-Or download from [existential.audio/blackhole](https://existential.audio/blackhole/).
-
-### Configure
-
-1. **Extension**: In the popup, select **BlackHole 2ch** as the Translation Output device
-2. **Google Meet**: Go to Meet Settings → Audio → set **Microphone** to **BlackHole 2ch**
-
-Now when you start translation, the translated audio plays into BlackHole, which Meet picks up as your microphone input. Other participants hear the translation.
-
-> **Tip:** To hear the call yourself while routing audio into Meet, create a macOS Multi-Output Device in Audio MIDI Setup that combines your speakers + BlackHole.
-
-## API Keys Required
-
-| Service          | Credit                       | How to Get                                                 |
-| ---------------- | ---------------------------- | ---------------------------------------------------------- |
-| **Speechmatics** | $200 (code: `VOICEAGENT200`) | [portal.speechmatics.com](https://portal.speechmatics.com) |
-| **MiniMax**      | $20                          | [minimax.io](https://www.minimax.io)                       |
-
-## Latency Tuning
-
-You can tune backend chunking and partial update behavior in `backend/.env`:
-
-```bash
-# Translation chunking
-TRANSLATION_TRIGGER_CHAR_THRESHOLD=24
-
-# Partial translated-text UI throttling
-TRANSLATION_PARTIAL_MIN_DELTA_CHARS=12
-TRANSLATION_PARTIAL_MIN_INTERVAL_MS=300
-
-# Speechmatics finalization speed
-SPEECHMATICS_MAX_DELAY=1.0
-SPEECHMATICS_RT_WS_URL=wss://eu.rt.speechmatics.com/v2/
-
-# Translation provider mode
-USE_SPEECHMATICS_TRANSLATION=1
-SPEECHMATICS_TRANSLATION_ENABLE_PARTIALS=1
-
-# TTS provider mode
-TTS_PROVIDER=speechmatics
-# TTS_PROVIDER=minimax
-# SPEECHMATICS_TTS_OUTPUT_FORMAT=wav_16000
-# SPEECHMATICS_TTS_VOICE_ID=sarah
-```
-
-Guidance:
-
-- Keep `USE_SPEECHMATICS_TRANSLATION=1` for the lowest end-to-end delay.
-- `TTS_PROVIDER=speechmatics` is now the default.
-- Switch to `TTS_PROVIDER=minimax` for broader multilingual voice coverage.
-- Lower `TRANSLATION_TRIGGER_CHAR_THRESHOLD` for faster response.
-- Higher `TRANSLATION_TRIGGER_CHAR_THRESHOLD` for fewer, larger chunks.
-- Lower `SPEECHMATICS_MAX_DELAY` for faster final transcripts.
-- Raise partial throttles if live text appears to constantly rewrite.
+- The extension expects the backend on `localhost:8000`.
+- The backend serves a small local dashboard at `/` for health and some settings.
+- The current live extension flow uses Azure for the active STT and TTS path.
+- Some legacy Convex files still exist under `web/`, but the current README no longer treats them as part of the supported setup.
 
 ## Tech Stack
 
-- **Extension**: React, TypeScript, Vite, CRXJS, Chrome MV3
-- **Backend**: Python, FastAPI, WebSocket, uv
-- **Web Dashboard**: React 18, TypeScript, Vite, Convex, Clerk
-- **STT**: Speechmatics Real-time API
-- **Translation**: Speechmatics RT Translation (recommended low-latency mode) or MiniMax M2 fallback
-- **TTS**: MiniMax Speech 2.8 Turbo (default) or Speechmatics preview TTS (test option)
-- **Voice Cloning**: MiniMax Voice Clone API (via web dashboard voice warmup flow)
-- **Audio Routing**: BlackHole (macOS virtual audio loopback)
+- Extension: React, TypeScript, Vite, Chrome MV3
+- Backend: Python, FastAPI, WebSocket, SQLite, uv
+- Live speech path: Azure Speech Translation or Azure Conversation Transcriber, plus Azure Speech Synthesis
+- Other integrated services in the backend: Speechmatics, MiniMax, Supermemory

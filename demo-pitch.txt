@@ -1,0 +1,66 @@
+Distill demo pitch
+
+Simple flow diagram
+
+[Chrome tab audio]
+        |
+        v
+[Chrome extension]
+        |
+        | WebSocket audio stream
+        v
+[FastAPI backend]
+        |
+        +--> [STT path]
+        |      either:
+        |      - Azure Speech Translation
+        |      - Azure Conversation Transcriber
+        |
+        +--> [Azure Speech Synthesis]
+        |      translated voice playback
+        |
+        v
+[Translated audio back to extension]
+        |
+        v
+[Selected output device]
+
+What it is
+Distill is a Chrome extension plus a local backend that translates spoken audio from a live tab and plays the translated speech back in near real time.
+
+Why it matters
+If two people do not share a language, Distill helps one person hear the other in a language they understand without leaving the call or switching tools.
+
+Simple demo pitch
+Open a live audio tab like Google Meet or YouTube, choose the source language and the target language, and start translation. Distill listens to the tab audio, sends it to the local backend, translates the speech, and plays back the translated voice through the selected output device.
+
+How the demo flows
+1. Start the backend on localhost:8000.
+2. Load the Chrome extension.
+3. Open a tab with speech.
+4. Pick the input language and the language you want to hear.
+5. Pick where the translated audio should play.
+6. Click Start Translation.
+7. Speak or play audio and show the live transcript plus translated playback.
+
+How it works
+1. The extension captures audio from the current browser tab.
+2. It streams that audio to the backend over WebSocket.
+3. The backend uses either Azure Speech Translation or Azure Conversation Transcriber, depending on the selected STT mode.
+4. The backend produces translated text from that speech.
+5. The backend uses Azure Speech Synthesis to turn the translated text back into speech.
+6. The extension plays that translated audio on the selected output device.
+
+What to say while demoing
+"This is live tab translation. I pick the language being spoken, pick the language I want to hear, and start. The extension captures the tab audio, sends it to our FastAPI backend, and the backend uses Azure speech services to transcribe, translate, and synthesize the translated voice back to my selected output device."
+
+Azure tech used here
+- Azure Speech SDK on the backend
+- Azure Speech Translation as one STT plus translation path
+- Azure Conversation Transcriber as the multi-speaker STT path
+- Azure Speech Synthesis for the translated audio playback
+
+Current setup in this repo
+- Backend: FastAPI on localhost:8000
+- Extension: Chrome extension loaded from extension/dist
+- Profile storage: local SQLite file at backend/profiles.db
