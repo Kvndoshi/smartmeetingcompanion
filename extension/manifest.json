@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Interpreter — Live Translation",
+  "description": "Real-time speaker translation for web chat apps. Hear everything in your native tongue.",
+  "version": "1.0.0",
+  "icons": {
+    "16": "public/icon16.png",
+    "48": "public/icon48.png",
+    "128": "public/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "Interpreter",
+    "default_icon": {
+      "16": "public/icon16.png",
+      "48": "public/icon48.png",
+      "128": "public/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "activeTab",
+    "storage",
+    "tabs"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["src/content/meet-widget.ts"],
+      "run_at": "document_idle"
+    }
+  ]
+}

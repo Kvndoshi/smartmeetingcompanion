@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interpreter — Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #141420;
+    --surface-2: #1c1c2e;
+    --border: #2a2a40;
+    --text: #e4e4ef;
+    --text-dim: #8888a0;
+    --accent: #6c5ce7;
+    --accent-hover: #7c6cf7;
+    --green: #00b894;
+    --red: #e17055;
+    --orange: #fdcb6e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .header {
+    padding: 24px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.5px; }
+  .header .status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  .status-dot.offline { background: var(--red); animation: none; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 32px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card-header h2 { font-size: 15px; font-weight: 600; }
+  .card-header .badge {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: var(--surface-2);
+    color: var(--text-dim);
+  }
+  .badge.ok { background: #00b89422; color: var(--green); }
+  .badge.warn { background: #fdcb6e22; color: var(--orange); }
+  .card-body { padding: 20px; }
+  .field { margin-bottom: 16px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .field input, .field select {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .field input:focus, .field select:focus {
+    border-color: var(--accent);
+  }
+  .field input::placeholder { color: #555570; }
+  .field .hint {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .field .hint a { color: var(--accent); text-decoration: none; }
+  .field .hint a:hover { text-decoration: underline; }
+  .row { display: flex; gap: 12px; }
+  .row .field { flex: 1; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 10px; margin-top: 16px; }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 12px 20px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 13px;
+    transform: translateY(80px);
+    opacity: 0;
+    transition: all 0.3s;
+    z-index: 100;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast.success { border-color: var(--green); }
+  .toast.error { border-color: var(--red); }
+  .icon { font-size: 18px; }
+  .sep { height: 1px; background: var(--border); margin: 16px 0; }
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .info-item {
+    background: var(--surface-2);
+    padding: 12px 14px;
+    border-radius: 8px;
+  }
+  .info-item .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .info-item .value { font-size: 14px; margin-top: 4px; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="icon">&#127760;</span>
+  <h1>Interpreter Dashboard</h1>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Checking...</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Server Status -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">&#9881;</span>
+      <h2>Server Status</h2>
+      <span class="badge" id="serverBadge">...</span>
+    </div>
+    <div class="card-body">
+      <div class="info-grid" id="serverInfo">
+        <div class="info-item">
+          <div class="label">Backend</div>
+          <div class="value" id="backendUrl">http://localhost:8000</div>
+        </div>
+        <div class="info-item">
+          <div class="label">Translation Provider</div>
+          <div class="value" id="translationProvider">—</div>
+        </div>
+        <div class="info-item">
+          <div class="label">TTS Provider</div>
+          <div class="value" id="ttsProvider">—</div>
+        </div>
+        <div class="info-item">
+          <div class="label">API Keys</div>
+          <div class="value" id="keysStatus">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Keys -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">&#128273;</span>
+      <h2>API Keys</h2>
+      <span class="badge" id="keysBadge">not set</span>
+    </div>
+    <div class="card-body">
+      <div class="field">
+        <label>Speechmatics API Key</label>
+        <input type="password" id="speechmaticsKey" placeholder="paste your key here...">
+        <div class="hint">Get from <a href="https://portal.speechmatics.com" target="_blank">portal.speechmatics.com</a> &mdash; use code <strong>VOICEAGENT200</strong> for $200 credit</div>
+      </div>
+      <div class="field">
+        <label>MiniMax API Key</label>
+        <input type="password" id="minimaxKey" placeholder="paste your key here...">
+        <div class="hint">Get from <a href="https://www.minimax.io" target="_blank">minimax.io</a> &mdash; $20 free credit</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" onclick="saveKeys()">Save Keys</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Translation Settings -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">&#9878;</span>
+      <h2>Translation Settings</h2>
+    </div>
+    <div class="card-body">
+      <div class="row">
+        <div class="field">
+          <label>Translation Engine</label>
+          <select id="translationEngine">
+            <option value="1">Speechmatics RT (recommended)</option>
+            <option value="0">MiniMax M2</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>TTS Engine</label>
+          <select id="ttsEngine">
+            <option value="speechmatics">Speechmatics TTS</option>
+            <option value="minimax">MiniMax Speech</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Chunk Threshold (chars)</label>
+          <input type="number" id="chunkThreshold" value="24" min="8" max="200">
+          <div class="hint">Lower = faster response, higher = more stable text</div>
+        </div>
+        <div class="field">
+          <label>Max Delay (seconds)</label>
+          <input type="text" id="maxDelay" value="1.0" placeholder="1.0">
+          <div class="hint">Speechmatics finalization speed</div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Extension Instructions -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">&#128268;</span>
+      <h2>Chrome Extension</h2>
+    </div>
+    <div class="card-body" style="color: var(--text-dim); font-size: 14px; line-height: 1.7;">
+      <ol style="padding-left: 20px;">
+        <li>Open <code style="background:var(--surface-2);padding:2px 6px;border-radius:4px;">chrome://extensions</code> in Chrome</li>
+        <li>Enable <strong>Developer Mode</strong> (top right toggle)</li>
+        <li>Click <strong>Load unpacked</strong></li>
+        <li>Select the <code style="background:var(--surface-2);padding:2px 6px;border-radius:4px;">interpreter/extension/dist</code> folder</li>
+        <li>Open any tab with audio (YouTube, Google Meet, etc.)</li>
+        <li>Click the Interpreter extension icon and start translating</li>
+      </ol>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + type;
+  setTimeout(() => el.className = 'toast', 3000);
+}
+
+async function checkHealth() {
+  try {
+    const r = await fetch(API + '/health');
+    const d = await r.json();
+    document.getElementById('statusDot').className = 'status-dot';
+    document.getElementById('statusText').textContent = 'Server running';
+    document.getElementById('serverBadge').className = 'badge ok';
+    document.getElementById('serverBadge').textContent = 'online';
+    return true;
+  } catch {
+    document.getElementById('statusDot').className = 'status-dot offline';
+    document.getElementById('statusText').textContent = 'Server offline';
+    document.getElementById('serverBadge').className = 'badge warn';
+    document.getElementById('serverBadge').textContent = 'offline';
+    return false;
+  }
+}
+
+async function loadSettings() {
+  try {
+    const r = await fetch(API + '/api/settings');
+    const d = await r.json();
+
+    document.getElementById('translationProvider').textContent =
+      d.USE_SPEECHMATICS_TRANSLATION === '1' ? 'Speechmatics RT' : 'MiniMax';
+    document.getElementById('ttsProvider').textContent =
+      (d.TTS_PROVIDER || 'speechmatics').charAt(0).toUpperCase() + (d.TTS_PROVIDER || 'speechmatics').slice(1);
+
+    if (d._keys_configured) {
+      document.getElementById('keysStatus').textContent = 'Configured';
+      document.getElementById('keysStatus').style.color = 'var(--green)';
+      document.getElementById('keysBadge').className = 'badge ok';
+      document.getElementById('keysBadge').textContent = 'configured';
+    } else {
+      document.getElementById('keysStatus').textContent = 'Not set';
+      document.getElementById('keysStatus').style.color = 'var(--orange)';
+      document.getElementById('keysBadge').className = 'badge warn';
+      document.getElementById('keysBadge').textContent = 'not set';
+    }
+
+    document.getElementById('translationEngine').value = d.USE_SPEECHMATICS_TRANSLATION || '1';
+    document.getElementById('ttsEngine').value = d.TTS_PROVIDER || 'speechmatics';
+    document.getElementById('chunkThreshold').value = d.TRANSLATION_TRIGGER_CHAR_THRESHOLD || '24';
+    document.getElementById('maxDelay').value = d.SPEECHMATICS_MAX_DELAY || '1.0';
+  } catch {}
+}
+
+async function saveKeys() {
+  const settings = {};
+  const sk = document.getElementById('speechmaticsKey').value.trim();
+  const mk = document.getElementById('minimaxKey').value.trim();
+  if (sk) settings.SPEECHMATICS_API_KEY = sk;
+  if (mk) settings.MINIMAX_API_KEY = mk;
+  if (Object.keys(settings).length === 0) {
+    toast('Enter at least one key', 'error');
+    return;
+  }
+  try {
+    const r = await fetch(API + '/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings })
+    });
+    const d = await r.json();
+    toast('Keys saved! Restart translation session to apply.');
+    document.getElementById('speechmaticsKey').value = '';
+    document.getElementById('minimaxKey').value = '';
+    loadSettings();
+  } catch (e) {
+    toast('Failed to save: ' + e.message, 'error');
+  }
+}
+
+async function saveSettings() {
+  const settings = {
+    USE_SPEECHMATICS_TRANSLATION: document.getElementById('translationEngine').value,
+    TTS_PROVIDER: document.getElementById('ttsEngine').value,
+    TRANSLATION_TRIGGER_CHAR_THRESHOLD: document.getElementById('chunkThreshold').value,
+    SPEECHMATICS_MAX_DELAY: document.getElementById('maxDelay').value,
+  };
+  try {
+    await fetch(API + '/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings })
+    });
+    toast('Settings saved!');
+    loadSettings();
+  } catch (e) {
+    toast('Failed to save: ' + e.message, 'error');
+  }
+}
+
+checkHealth().then(ok => { if (ok) loadSettings(); });
+setInterval(checkHealth, 10000);
+</script>
+
+</body>
+</html>
