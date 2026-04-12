@@ -354,26 +354,20 @@ async def websocket_translate(ws: WebSocket):
         except (ConnectionError, RuntimeError) as e:
             logger.error("Error in on_transcript: %s", e)
 
-    # Tracks how many words of the current partial translation have already
-    # been sent to TTS, so we don't re-synthesize the same words.
-    tts_words_sent = 0
-
     async def on_translation(text: str, is_final: bool):
         """Called when translation produces translated text.
 
-        Strategy: start TTS as soon as we have 5+ translated words (partial
-        or final), and flush any remaining words on is_final. This cuts
-        first-audio latency dramatically because we don't wait for Azure
-        Translation to finalize the entire segment before speaking.
+        Partials are forwarded to the UI for live visual feedback.
+        TTS only fires on is_final to avoid mid-sentence audio ticks
+        from chunking artifacts (WAV headers, silence gaps). Azure
+        Translation already produces short finals (~5-8 words) so
+        latency stays low.
         """
-        nonlocal sentence_counter, tts_words_sent
+        nonlocal sentence_counter
         if not connection_open:
             return
 
         try:
-            words = text.split() if text.strip() else []
-            word_count = len(words)
-
             if is_final:
                 sentence_counter += 1
                 sent = await safe_send_json({
@@ -382,32 +376,13 @@ async def websocket_translate(ws: WebSocket):
                 })
                 if not sent:
                     return
-                # Flush any remaining words that haven't been spoken yet.
-                if word_count > tts_words_sent and text.strip():
-                    remaining = " ".join(words[tts_words_sent:])
-                    if remaining.strip():
-                        logger.info(
-                            "[TTS] final flush (%d words remaining): %s",
-                            len(remaining.split()), remaining[:60],
-                        )
-                        await enqueue_translation(remaining.strip())
-                tts_words_sent = 0
+                if text.strip():
+                    await enqueue_translation(text.strip())
             else:
                 await safe_send_json({
                     "type": "translated_text_partial",
                     "text": text,
                 })
-                # If we've accumulated 5+ new words since the last TTS send,
-                # ship them immediately. This is the streaming-5-words path.
-                pending_word_count = word_count - tts_words_sent
-                if pending_word_count >= 5 and text.strip():
-                    piece = " ".join(words[tts_words_sent:])
-                    tts_words_sent = word_count
-                    logger.info(
-                        "[TTS] partial flush (%d words): %s",
-                        len(piece.split()), piece[:60],
-                    )
-                    await enqueue_translation(piece.strip())
         except (ConnectionError, RuntimeError) as e:
             logger.error("Error in on_translation: %s", e)
 
