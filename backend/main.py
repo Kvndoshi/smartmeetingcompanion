@@ -28,6 +28,7 @@ from services.azure_translation_client import AzureTranslationClient
 from services.azure_conversation_client import AzureConversationClient
 from services.azure_tts_client import AzureTtsClient
 from services.profile_store import init_db, get_profile, upsert_profile, update_voice_profile, set_voice_status, list_profiles
+from supermemory.client import SupermemorySession
 
 load_dotenv()
 
@@ -237,6 +238,8 @@ async def websocket_translate(ws: WebSocket):
 
     source_lang = "en"
     target_lang = "es"
+    tab_url: str | None = None
+    tab_title: str | None = None
 
     speechmatics_key = os.getenv("SPEECHMATICS_API_KEY", "")
     minimax_key = os.getenv("MINIMAX_API_KEY", "")
@@ -274,6 +277,7 @@ async def websocket_translate(ws: WebSocket):
     translation_worker_task: asyncio.Task | None = None
     translation_lock = asyncio.Lock()
     sentence_counter = 0  # alternates voices for multi-speaker
+    supermemory_session: SupermemorySession | None = None
 
     async def safe_send_json(payload: dict) -> bool:
         nonlocal connection_open
@@ -340,6 +344,9 @@ async def websocket_translate(ws: WebSocket):
                 return
 
             if is_final and text.strip():
+                if supermemory_session:
+                    supermemory_session.add_transcript(text)
+
                 if stt_provider in {"azure", "azure_diarize"} or use_speechmatics_translation:
                     return
 
@@ -377,6 +384,8 @@ async def websocket_translate(ws: WebSocket):
                 if not sent:
                     return
                 if text.strip():
+                    if supermemory_session:
+                        supermemory_session.add_translation(text.strip())
                     await enqueue_translation(text.strip())
             else:
                 await safe_send_json({
@@ -605,6 +614,8 @@ async def websocket_translate(ws: WebSocket):
                 if msg.get("type") == "config":
                     source_lang = msg.get("source_lang", "en")
                     target_lang = msg.get("target_lang", "es")
+                    tab_url = msg.get("tab_url") or None
+                    tab_title = msg.get("tab_title") or None
                     requested_tts_provider = str(msg.get("tts_provider", "")).strip().lower()
                     if requested_tts_provider in {"minimax", "azure"}:
                         tts_provider = requested_tts_provider
@@ -612,6 +623,12 @@ async def websocket_translate(ws: WebSocket):
                     if tts_provider != "azure":
                         tts_provider = "azure"
                     sentence_counter = 0
+                    supermemory_session = SupermemorySession(
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                        tab_url=tab_url,
+                        tab_title=tab_title,
+                    )
                     logger.info("Config: %s → %s", source_lang, target_lang)
                     logger.info("STT provider: %s  TTS provider: %s", stt_provider, tts_provider)
 
@@ -685,6 +702,8 @@ async def websocket_translate(ws: WebSocket):
 
         if stt_client:
             await stt_client.close()
+        if supermemory_session:
+            await supermemory_session.flush()
         await speechmatics_tts.close()
         await minimax.close()
         await azure_tts.close()

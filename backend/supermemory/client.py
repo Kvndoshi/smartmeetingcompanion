@@ -13,6 +13,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,6 +38,19 @@ class _Entry:
     original: str
     translated: str | None
     ts: float = field(default_factory=time.time)
+
+
+def _is_youtube_watch_url(url: str | None) -> bool:
+    if not url:
+        return False
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    host = parsed.netloc.lower()
+    return host.endswith("youtube.com") and parsed.path == "/watch"
 
 
 class SupermemorySession:
@@ -108,10 +122,12 @@ class SupermemorySession:
             logger.warning("[Supermemory] %s", e)
             return None
 
+        custom_id = self.tab_url if _is_youtube_watch_url(self.tab_url) else self.session_id
+
         payload = {
             "content": self._build_document(),
             "containerTag": SUPERMEMORY_CONTAINER_TAG,
-            "customId": self.session_id,
+            "customId": custom_id,
             "entityContext": (
                 "Live translation sessions captured by the Interpreter Chrome extension. "
                 "Extract speakers, topics, decisions, action items, and named entities. "
@@ -126,6 +142,7 @@ class SupermemorySession:
                 **({"tabUrl": self.tab_url} if self.tab_url else {}),
                 **({"tabTitle": self.tab_title} if self.tab_title else {}),
             },
+            **({"sourceUrl": self.tab_url} if self.tab_url else {}),
         }
 
         try:
@@ -139,8 +156,8 @@ class SupermemorySession:
             if response.status_code == 200:
                 result = response.json()
                 logger.info(
-                    "[Supermemory] Session saved → container=%s  id=%s  status=%s",
-                    SUPERMEMORY_CONTAINER_TAG, result.get("id"), result.get("status"),
+                    "[Supermemory] Session saved → container=%s  customId=%s  id=%s  status=%s",
+                    SUPERMEMORY_CONTAINER_TAG, custom_id, result.get("id"), result.get("status"),
                 )
                 return result
             else:

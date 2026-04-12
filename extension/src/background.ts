@@ -125,15 +125,31 @@ function connectToBackend(): void {
 
   ws.onopen = () => {
     console.log("[BG] Connected to backend");
-    // Send config
-    ws.send(
-      JSON.stringify({
-        type: "config",
-        source_lang: state.sourceLang,
-        target_lang: state.targetLang,
-        tts_provider: state.ttsProvider,
-      })
-    );
+    const sendConfig = async () => {
+      let tabUrl: string | undefined;
+      let tabTitle: string | undefined;
+      if (state.tabId) {
+        try {
+          const tab = await chrome.tabs.get(state.tabId);
+          tabUrl = tab.url;
+          tabTitle = tab.title;
+        } catch {
+          // Ignore tab lookup failures and send the rest of the config.
+        }
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: "config",
+          source_lang: state.sourceLang,
+          target_lang: state.targetLang,
+          tts_provider: state.ttsProvider,
+          ...(tabUrl ? { tab_url: tabUrl } : {}),
+          ...(tabTitle ? { tab_title: tabTitle } : {}),
+        })
+      );
+    };
+    void sendConfig();
     broadcastToPopup({ type: "status", status: "connected" });
   };
 
@@ -364,13 +380,30 @@ function connectMicBackend(): void {
 
   ws.onopen = () => {
     console.log("[BG] Mic WebSocket connected");
-    // Language swap: sourceLang = language others speak, targetLang = language user understands.
-    // For outgoing: user speaks targetLang, translate to sourceLang for others.
-    ws.send(JSON.stringify({
-      type: "config",
-      source_lang: micState.targetLang,  // user speaks their own language
-      target_lang: micState.sourceLang,  // translate to the meeting language
-    }));
+    const sendConfig = async () => {
+      let tabUrl: string | undefined;
+      let tabTitle: string | undefined;
+      if (state.tabId) {
+        try {
+          const tab = await chrome.tabs.get(state.tabId);
+          tabUrl = tab.url;
+          tabTitle = tab.title;
+        } catch {
+          // Ignore tab lookup failures and send the rest of the config.
+        }
+      }
+
+      // Language swap: sourceLang = language others speak, targetLang = language user understands.
+      // For outgoing: user speaks targetLang, translate to sourceLang for others.
+      ws.send(JSON.stringify({
+        type: "config",
+        source_lang: micState.targetLang,
+        target_lang: micState.sourceLang,
+        ...(tabUrl ? { tab_url: tabUrl } : {}),
+        ...(tabTitle ? { tab_title: tabTitle } : {}),
+      }));
+    };
+    void sendConfig();
   };
 
   ws.onmessage = (event) => {
