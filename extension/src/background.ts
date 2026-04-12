@@ -25,6 +25,22 @@ const state: TranslationState = {
   outputDeviceId: null,
 };
 
+interface MicTranslationState {
+  isTranslating: boolean;
+  micSocket: WebSocket | null;
+  sourceLang: string;
+  targetLang: string;
+  port: chrome.runtime.Port | null;
+}
+
+const micState: MicTranslationState = {
+  isTranslating: false,
+  micSocket: null,
+  sourceLang: "en",
+  targetLang: "es",
+  port: null,
+};
+
 // ── Message Types ──
 type Message =
   | {
@@ -43,7 +59,15 @@ type Message =
   | { type: "status"; status: string }
   | { type: "error"; message: string }
   | { type: "set-output-device"; deviceId: string }
-  | { type: "get-state" };
+  | { type: "get-state" }
+  | { type: "start-mic-translation"; sourceLang: string; targetLang: string }
+  | { type: "stop-mic-translation" }
+  | { type: "mic-status"; status: string }
+  | { type: "mic-transcript"; text: string; isFinal: boolean }
+  | { type: "mic-translated-text-partial"; text: string }
+  | { type: "mic-translated-text"; text: string }
+  | { type: "mic-interceptor-activate" }
+  | { type: "mic-interceptor-deactivate" };
 
 // ── Offscreen Document Management ──
 async function ensureOffscreenDocument(): Promise<void> {
@@ -320,11 +344,154 @@ async function stopCapture(): Promise<void> {
   disconnectBackend();
   await removeOffscreenDocument();
 
+  // Also stop mic translation if running
+  if (micState.isTranslating) {
+    await stopMicTranslation();
+  }
+
   state.isCapturing = false;
   state.captureStartedAt = null;
   broadcastToPopup({ type: "status", status: "idle" });
   state.tabId = null;
 }
+
+// ── Mic WebSocket Connection ──
+function connectMicBackend(): void {
+  if (micState.micSocket?.readyState === WebSocket.OPEN) return;
+
+  const ws = new WebSocket(BACKEND_WS_URL);
+  micState.micSocket = ws;
+
+  ws.onopen = () => {
+    console.log("[BG] Mic WebSocket connected");
+    // Language swap: sourceLang = language others speak, targetLang = language user understands.
+    // For outgoing: user speaks targetLang, translate to sourceLang for others.
+    ws.send(JSON.stringify({
+      type: "config",
+      source_lang: micState.targetLang,  // user speaks their own language
+      target_lang: micState.sourceLang,  // translate to the meeting language
+    }));
+  };
+
+  ws.onmessage = (event) => {
+    if (event.data instanceof Blob) {
+      // Binary = translated audio -> send back to interceptor via port
+      event.data.arrayBuffer().then((buffer) => {
+        if (micState.port) {
+          micState.port.postMessage({
+            type: "mic-translated-audio",
+            data: Array.from(new Uint8Array(buffer)),
+          });
+        }
+      });
+    } else {
+      try {
+        const msg = JSON.parse(event.data);
+        // Forward transcripts through port to bridge -> widget
+        if (msg.type === "transcript" && micState.port) {
+          micState.port.postMessage({
+            type: "mic-transcript",
+            text: msg.text,
+            isFinal: msg.is_final,
+          });
+          // Also broadcast to popup/widget for transcript display
+          broadcastToPopup({
+            type: "mic-transcript",
+            text: msg.text,
+            isFinal: msg.is_final,
+          });
+        } else if (msg.type === "translated_text_partial") {
+          if (micState.port) {
+            micState.port.postMessage({ type: "mic-translated-text-partial", text: msg.text });
+          }
+          broadcastToPopup({ type: "mic-translated-text-partial", text: msg.text });
+        } else if (msg.type === "translated_text") {
+          if (micState.port) {
+            micState.port.postMessage({ type: "mic-translated-text", text: msg.text });
+          }
+          broadcastToPopup({ type: "mic-translated-text", text: msg.text });
+        } else if (msg.type === "error") {
+          broadcastToPopup({ type: "error", message: `Mic translation: ${msg.message}` });
+        }
+      } catch {
+        console.warn("[BG] Unknown mic WebSocket message:", event.data);
+      }
+    }
+  };
+
+  ws.onerror = (e) => {
+    console.error("[BG] Mic WebSocket error:", e);
+    broadcastToPopup({ type: "error", message: "Mic translation backend connection failed." });
+  };
+
+  ws.onclose = () => {
+    console.log("[BG] Mic WebSocket closed");
+    micState.micSocket = null;
+  };
+}
+
+function disconnectMicBackend(): void {
+  if (micState.micSocket) {
+    micState.micSocket.close();
+    micState.micSocket = null;
+  }
+}
+
+// ── Mic Translation Start / Stop ──
+async function startMicTranslation(sourceLang: string, targetLang: string): Promise<void> {
+  micState.sourceLang = sourceLang;
+  micState.targetLang = targetLang;
+
+  // Connect to backend
+  connectMicBackend();
+
+  // Tell the bridge content script to activate the interceptor
+  if (state.tabId) {
+    chrome.tabs.sendMessage(state.tabId, {
+      type: "mic-interceptor-activate",
+    }).catch((err) => {
+      console.error("[BG] Failed to activate mic interceptor:", err);
+    });
+  }
+
+  micState.isTranslating = true;
+  broadcastToPopup({ type: "mic-status", status: "translating" });
+}
+
+async function stopMicTranslation(): Promise<void> {
+  // Tell bridge to deactivate interceptor
+  if (state.tabId) {
+    chrome.tabs.sendMessage(state.tabId, {
+      type: "mic-interceptor-deactivate",
+    }).catch(() => {});
+  }
+
+  disconnectMicBackend();
+  micState.isTranslating = false;
+  micState.port = null;
+  broadcastToPopup({ type: "mic-status", status: "idle" });
+}
+
+// ── Mic Capture Port Connection ──
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "mic-capture") return;
+
+  console.log("[BG] Mic capture port connected");
+  micState.port = port;
+
+  port.onMessage.addListener((msg) => {
+    if (msg.type === "mic-audio-data" && micState.micSocket?.readyState === WebSocket.OPEN) {
+      const bytes = new Uint8Array(msg.data);
+      micState.micSocket.send(bytes.buffer);
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    console.log("[BG] Mic capture port disconnected");
+    micState.port = null;
+    stopMicTranslation();
+  });
+});
 
 // ── Broadcast to Popup + Content Script ──
 function broadcastToPopup(msg: object): void {
@@ -390,9 +557,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       break;
 
+    case "start-mic-translation": {
+      startMicTranslation(message.sourceLang, message.targetLang)
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e.message }));
+      return true;
+    }
+
+    case "stop-mic-translation":
+      stopMicTranslation()
+        .then(() => sendResponse({ success: true }))
+        .catch((e) => sendResponse({ success: false, error: e.message }));
+      return true;
+
     case "get-state":
       sendResponse({
         isCapturing: state.isCapturing,
+        isMicTranslating: micState.isTranslating,
         captureStartedAt: state.captureStartedAt,
         sourceLang: state.sourceLang,
         targetLang: state.targetLang,
@@ -405,7 +586,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Tab Close Handler ──
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === state.tabId && state.isCapturing) {
-    stopCapture();
+  if (tabId === state.tabId) {
+    if (state.isCapturing) stopCapture();
+    if (micState.isTranslating) stopMicTranslation();
   }
 });

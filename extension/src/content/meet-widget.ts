@@ -390,6 +390,55 @@ const WIDGET_CSS = `
   flex-direction: column;
   align-items: flex-end;
 }
+
+/* ── Mic Translation Button ── */
+.action-btn.mic-start {
+  background: var(--surface);
+  color: var(--amber);
+  border: 1px solid var(--amber-dim);
+  margin-top: 6px;
+}
+
+.action-btn.mic-start:hover {
+  background: var(--amber-dim);
+  border-color: var(--amber);
+}
+
+.action-btn.mic-stop {
+  background: var(--amber-dim);
+  color: var(--amber);
+  border: 1px solid var(--amber);
+  margin-top: 6px;
+}
+
+.action-btn.mic-stop:hover {
+  background: var(--elevated);
+}
+
+/* Mic status row */
+.p-mic-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 16px 6px;
+  font-size: 10px;
+  color: var(--text2);
+  font-weight: 500;
+}
+
+/* Transcript source label */
+.t-source {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--amber);
+  margin-bottom: 2px;
+}
+
+.t-source.incoming {
+  color: var(--green);
+}
 `;
 
 /* ═══════════════════════════════════════════
@@ -406,6 +455,8 @@ const SVG_PLAY = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v
 const SVG_STOP = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
 
 const SVG_MINUS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+
+const SVG_MIC = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>`;
 
 /* ═══════════════════════════════════════════
    Widget Class
@@ -426,6 +477,14 @@ class InterpreterWidget {
   private transcripts: { orig: string; trans: string }[] = [];
   private currentOrig = "";
   private currentTrans = "";
+
+  private isMicTranslating = false;
+  private micActionBtn!: HTMLButtonElement;
+  private micStatusDot!: HTMLDivElement;
+  private micStatusLabel!: HTMLSpanElement;
+  private micTranscripts: { orig: string; trans: string }[] = [];
+  private micCurrentOrig = "";
+  private micCurrentTrans = "";
 
   private fabDot!: HTMLDivElement;
   private statusDot!: HTMLDivElement;
@@ -519,12 +578,24 @@ class InterpreterWidget {
     this.actionBtn.innerHTML = `${SVG_PLAY}<span>Start Translation</span>`;
     this.actionBtn.addEventListener("click", () => this.toggleCapture());
 
+    // Mic translation button
+    this.micActionBtn = this.el("button", "action-btn mic-start") as HTMLButtonElement;
+    this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
+    this.micActionBtn.addEventListener("click", () => this.toggleMicTranslation());
+
     // Transcript
     this.transcriptBox = this.el("div", "transcript");
     this.transcriptBox.innerHTML = `<div class="t-empty">Translations will appear here</div>`;
 
-    body.append(langs, this.actionBtn, this.transcriptBox);
-    this.panel.append(header, statusRow, body);
+    // Mic status
+    const micStatusRow = this.el("div", "p-mic-status");
+    this.micStatusDot = this.el("div", "s-dot") as HTMLDivElement;
+    this.micStatusLabel = this.el("span") as HTMLSpanElement;
+    this.micStatusLabel.textContent = "";
+    micStatusRow.append(this.micStatusDot, this.micStatusLabel);
+
+    body.append(langs, this.actionBtn, this.micActionBtn, this.transcriptBox);
+    this.panel.append(header, statusRow, micStatusRow, body);
   }
 
   private buildLangSelect(selected: string): HTMLSelectElement {
@@ -592,6 +663,65 @@ class InterpreterWidget {
     }
   }
 
+  /* ── Mic Start / Stop ── */
+
+  private toggleMicTranslation(): void {
+    if (this.isMicTranslating) {
+      chrome.runtime.sendMessage({
+        type: "stop-mic-translation",
+        target: "background",
+      });
+    } else {
+      this.sourceLang = this.sourceSelect.value;
+      this.targetLang = this.targetSelect.value;
+      chrome.runtime.sendMessage(
+        {
+          type: "start-mic-translation",
+          target: "background",
+          sourceLang: this.sourceLang,
+          targetLang: this.targetLang,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            this.setMicStatus("error", chrome.runtime.lastError.message);
+            return;
+          }
+          if (response && !response.success) {
+            this.setMicStatus("error", response.error || "Failed to start mic translation");
+          }
+        }
+      );
+    }
+  }
+
+  /* ── Mic Status Updates ── */
+
+  private setMicStatus(s: "idle" | "translating" | "error", errorMsg?: string): void {
+    this.isMicTranslating = s === "translating";
+
+    this.micStatusDot.className = `s-dot${s === "translating" ? " capturing" : s === "error" ? " error" : ""}`;
+
+    if (s === "translating") {
+      this.micStatusLabel.textContent = "Your voice is being translated";
+      this.micActionBtn.className = "action-btn mic-stop";
+      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Stop My Voice</span>`;
+    } else if (s === "error") {
+      this.micStatusLabel.textContent = errorMsg || "Mic error";
+      this.micActionBtn.className = "action-btn mic-start";
+      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
+    } else {
+      this.micStatusLabel.textContent = "";
+      this.micActionBtn.className = "action-btn mic-start";
+      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
+    }
+
+    // Disable language selectors only if EITHER direction is active
+    const anyActive = this.isCapturing || this.isMicTranslating;
+    this.sourceSelect.disabled = anyActive;
+    this.targetSelect.disabled = anyActive;
+    this.swapBtn.disabled = anyActive;
+  }
+
   /* ── Status Updates ── */
 
   private setStatus(s: WidgetStatus, errorMsg?: string): void {
@@ -608,9 +738,10 @@ class InterpreterWidget {
       wfSvg.classList.toggle("active", this.isCapturing);
     }
 
-    this.sourceSelect.disabled = this.isCapturing;
-    this.targetSelect.disabled = this.isCapturing;
-    this.swapBtn.disabled = this.isCapturing;
+    const anyActive = this.isCapturing || this.isMicTranslating;
+    this.sourceSelect.disabled = anyActive;
+    this.targetSelect.disabled = anyActive;
+    this.swapBtn.disabled = anyActive;
 
     if (this.isCapturing) {
       this.actionBtn.className = "action-btn stop";
@@ -625,23 +756,38 @@ class InterpreterWidget {
 
   private renderTranscript(): void {
     const box = this.transcriptBox;
-    if (this.transcripts.length === 0 && !this.currentOrig) {
+    const hasIncoming = this.transcripts.length > 0 || !!this.currentOrig;
+    const hasOutgoing = this.micTranscripts.length > 0 || !!this.micCurrentOrig;
+
+    if (!hasIncoming && !hasOutgoing) {
       box.innerHTML = `<div class="t-empty">Translations will appear here</div>`;
       return;
     }
 
     let html = "";
-    const recent = this.transcripts.slice(-5);
-    for (const t of recent) {
-      html += `<div class="t-entry"><div class="t-orig">${this.esc(t.orig)}</div><div class="t-trans">${this.esc(t.trans)}</div></div>`;
+
+    // Show incoming transcripts
+    const recentIncoming = this.transcripts.slice(-3);
+    for (const t of recentIncoming) {
+      html += `<div class="t-entry"><div class="t-source incoming">THEM</div><div class="t-orig">${this.esc(t.orig)}</div><div class="t-trans">${this.esc(t.trans)}</div></div>`;
     }
     if (this.currentOrig) {
-      html += `<div class="t-entry"><div class="t-orig">${this.esc(this.currentOrig)}</div>`;
-      if (this.currentTrans) {
-        html += `<div class="t-trans">${this.esc(this.currentTrans)}</div>`;
-      }
+      html += `<div class="t-entry"><div class="t-source incoming">THEM</div><div class="t-orig">${this.esc(this.currentOrig)}</div>`;
+      if (this.currentTrans) html += `<div class="t-trans">${this.esc(this.currentTrans)}</div>`;
       html += `</div>`;
     }
+
+    // Show outgoing transcripts
+    const recentOutgoing = this.micTranscripts.slice(-3);
+    for (const t of recentOutgoing) {
+      html += `<div class="t-entry"><div class="t-source">YOU</div><div class="t-orig">${this.esc(t.orig)}</div><div class="t-trans">${this.esc(t.trans)}</div></div>`;
+    }
+    if (this.micCurrentOrig) {
+      html += `<div class="t-entry"><div class="t-source">YOU</div><div class="t-orig">${this.esc(this.micCurrentOrig)}</div>`;
+      if (this.micCurrentTrans) html += `<div class="t-trans">${this.esc(this.micCurrentTrans)}</div>`;
+      html += `</div>`;
+    }
+
     box.innerHTML = html;
     box.scrollTop = box.scrollHeight;
   }
@@ -677,6 +823,27 @@ class InterpreterWidget {
         case "error":
           this.setStatus("error", msg.message);
           break;
+        case "mic-status":
+          this.setMicStatus(msg.status as "idle" | "translating" | "error");
+          break;
+        case "mic-transcript":
+          if (msg.isFinal) {
+            this.micCurrentOrig = (this.micCurrentOrig + " " + msg.text).trim();
+          } else {
+            this.micCurrentOrig = msg.text;
+          }
+          this.renderTranscript();
+          break;
+        case "mic-translated-text":
+          this.micTranscripts.push({ orig: this.micCurrentOrig, trans: msg.text });
+          this.micCurrentOrig = "";
+          this.micCurrentTrans = "";
+          this.renderTranscript();
+          break;
+        case "mic-translated-text-partial":
+          this.micCurrentTrans = msg.text;
+          this.renderTranscript();
+          break;
       }
     });
   }
@@ -686,6 +853,9 @@ class InterpreterWidget {
       if (chrome.runtime.lastError) return;
       if (res?.isCapturing) {
         this.setStatus("capturing");
+      }
+      if (res?.isMicTranslating) {
+        this.setMicStatus("translating");
       }
     });
   }
