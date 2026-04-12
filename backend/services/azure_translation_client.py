@@ -48,9 +48,35 @@ _SOURCE_LOCALE_MAP: dict[str, str] = {
 _TARGET_LANG_MAP: dict[str, str] = {code: code for code in _SOURCE_LOCALE_MAP.keys()}
 _TARGET_LANG_MAP["zh"] = "zh-Hans"
 
+# Default voices for server-side TTS synthesis (one per target language).
+_SYNTHESIS_VOICES: dict[str, str] = {
+    "en": "en-US-JennyNeural",
+    "es": "es-ES-ElviraNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+    "it": "it-IT-ElsaNeural",
+    "pt": "pt-BR-FranciscaNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "ar": "ar-SA-ZariyahNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "nl": "nl-NL-ColetteNeural",
+    "sv": "sv-SE-SofieNeural",
+    "pl": "pl-PL-AgnieszkaNeural",
+    "tr": "tr-TR-EmelNeural",
+}
+
 
 class AzureTranslationClient:
-    """Streaming STT + translation against Azure Speech Services."""
+    """Streaming STT + translation against Azure Speech Services.
+
+    When ``on_audio`` is provided, the TranslationRecognizer also performs
+    server-side TTS synthesis: the ``Synthesizing`` event streams audio
+    chunks of the *translated* text directly, eliminating a separate TTS
+    round-trip.  Set ``has_builtin_tts`` so the caller can skip external TTS.
+    """
 
     def __init__(
         self,
@@ -60,6 +86,7 @@ class AzureTranslationClient:
         target_language: str | None = None,
         on_transcript: Callable[[str, bool], Awaitable[None]] | None = None,
         on_translation: Callable[[str, bool], Awaitable[None]] | None = None,
+        on_audio: Callable[[bytes], Awaitable[None]] | None = None,
     ):
         self.api_key = api_key
         self.region = region
@@ -67,6 +94,9 @@ class AzureTranslationClient:
         self.target_lang = _TARGET_LANG_MAP.get(target_language, target_language) if target_language else None
         self.on_transcript = on_transcript
         self.on_translation = on_translation
+        self.on_audio = on_audio
+        self.has_builtin_tts: bool = on_audio is not None
+        self._raw_target_lang: str = target_language or "en"
 
         self.is_connected = False
         self.last_speaker_gender: str | None = None
@@ -91,7 +121,7 @@ class AzureTranslationClient:
         translation_config.speech_recognition_language = self.source_locale
         translation_config.add_target_language(self.target_lang)
 
-        segmentation_ms = os.getenv("AZURE_SEGMENTATION_SILENCE_MS", "500").strip() or "500"
+        segmentation_ms = os.getenv("AZURE_SEGMENTATION_SILENCE_MS", "300").strip() or "300"
         translation_config.set_property(
             speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
             segmentation_ms,
@@ -101,6 +131,18 @@ class AzureTranslationClient:
             "true",
         )
         translation_config.output_format = speechsdk.OutputFormat.Detailed
+
+        # ── Server-side TTS synthesis ──────────────────────────────────
+        # When voice_name is set, Azure synthesizes the translated text
+        # and fires the Synthesizing event with streaming audio chunks.
+        # This collapses STT → translate → TTS into one server call.
+        if self.on_audio:
+            voice = self._pick_synthesis_voice()
+            translation_config.voice_name = voice
+            translation_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_SynthOutputFormat,
+                "raw-16khz-16bit-mono-pcm",
+            )
 
         audio_format = speechsdk.audio.AudioStreamFormat(
             samples_per_second=16000,
@@ -120,13 +162,18 @@ class AzureTranslationClient:
         self._recognizer.canceled.connect(self._on_canceled)
         self._recognizer.session_stopped.connect(self._on_session_stopped)
 
+        # Subscribe to synthesis events for streaming audio
+        if self.on_audio:
+            self._recognizer.synthesizing.connect(self._on_synthesizing)
+
         self._recognizer.start_continuous_recognition()
         self.is_connected = True
         logger.info(
-            "Azure translation connected (source=%s target=%s segmentation=%sms)",
+            "Azure translation connected (source=%s target=%s segmentation=%sms synthesis=%s)",
             self.source_locale,
             self.target_lang,
             segmentation_ms,
+            self._pick_synthesis_voice() if self.on_audio else "off",
         )
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
@@ -198,6 +245,25 @@ class AzureTranslationClient:
         speaker_id = self._parse_speaker_id(raw_str)
         if speaker_id:
             self.last_speaker_id = speaker_id
+
+    def _on_synthesizing(self, evt) -> None:
+        """Stream synthesized audio chunks to the client in real-time."""
+        try:
+            audio = evt.result.audio if hasattr(evt.result, "audio") else None
+            if audio and len(audio) > 0 and self.on_audio and self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.on_audio(audio),
+                    self._loop,
+                )
+        except Exception as e:
+            logger.error("Synthesizing event error: %s", e)
+
+    def _pick_synthesis_voice(self) -> str:
+        """Pick a TTS voice for the target language."""
+        lang = self._raw_target_lang.lower()
+        if lang.startswith("zh"):
+            lang = "zh"
+        return _SYNTHESIS_VOICES.get(lang, "en-US-JennyNeural")
 
     def _emit(self, transcript: str, translation: str, is_final: bool) -> None:
         if self._loop is None:

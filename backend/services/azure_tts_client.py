@@ -24,8 +24,8 @@ logger = logging.getLogger("interpreter.azure_tts")
 # Pool of voices per language, ordered so speaker rotation picks distinct ones.
 # Index 0 = speaker 1, index 1 = speaker 2, wraps around.
 _VOICE_POOL: dict[str, list[str]] = {
-    "en": ["en-US-SteffanNeural", "en-US-JennyNeural", "en-US-AriaNeural", "en-US-GuyNeural"],
-    "es": ["es-ES-AlvaroNeural", "es-ES-ElviraNeural", "es-MX-JorgeNeural", "es-MX-DaliaNeural"],
+    "en": ["en-US-AndrewNeural", "en-US-AvaNeural", "en-US-EmmaNeural", "en-US-GuyNeural"],
+    "es": ["es-ES-AlvaroNeural", "es-ES-ElviraNeural", "es-MX-DaliaNeural", "es-MX-JorgeNeural"],
     "fr": ["fr-FR-HenriNeural", "fr-FR-DeniseNeural", "fr-CA-JeanNeural", "fr-CA-SylvieNeural"],
     "de": ["de-DE-ConradNeural", "de-DE-KatjaNeural", "de-AT-JonasNeural", "de-AT-IngridNeural"],
     "it": ["it-IT-DiegoNeural", "it-IT-ElsaNeural", "it-IT-GiuseppeNeural", "it-IT-LisandroNeural"],
@@ -41,8 +41,8 @@ _VOICE_POOL: dict[str, list[str]] = {
 
 # Gender-mapped defaults (used when speaker_id is None)
 _GENDER_DEFAULTS: dict[tuple[str, str], str] = {
-    ("en", "male"): "en-US-SteffanNeural",
-    ("en", "female"): "en-US-JennyNeural",
+    ("en", "male"): "en-US-AndrewNeural",
+    ("en", "female"): "en-US-AvaNeural",
     ("es", "male"): "es-ES-AlvaroNeural",
     ("es", "female"): "es-ES-ElviraNeural",
     ("fr", "male"): "fr-FR-HenriNeural",
@@ -79,7 +79,7 @@ class AzureTtsClient:
             subscription=api_key, region=region
         )
         self._speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
+            speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
         )
 
     def _pick_voice(self, language: str, gender_hint: str | None = None, speaker_id: str | None = None) -> str:
@@ -139,8 +139,11 @@ class AzureTtsClient:
             raise ValueError("Azure TTS requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION")
 
         voice_name = self._pick_voice(language, gender_hint, speaker_id)
+        # Capture the event loop BEFORE entering the thread — asyncio.to_thread
+        # runs the function in a worker thread where get_running_loop() would fail.
+        loop = asyncio.get_running_loop() if on_chunk else None
         return await asyncio.to_thread(
-            self._synthesize_streaming_blocking, text, voice_name, on_chunk
+            self._synthesize_streaming_blocking, text, voice_name, on_chunk, loop
         )
 
     def _synthesize_streaming_blocking(
@@ -148,8 +151,8 @@ class AzureTtsClient:
         text: str,
         voice_name: str,
         on_chunk: Callable[[bytes], Awaitable[None]] | None,
+        loop: asyncio.AbstractEventLoop | None,
     ) -> bytes | None:
-        loop = asyncio.get_running_loop() if on_chunk else None
 
         # Create a fresh synthesizer (cheap) with the shared speech_config.
         # Swap voice name per call.

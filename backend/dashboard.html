@@ -276,7 +276,8 @@
         <div class="field">
           <label>STT Engine</label>
           <select id="sttEngine">
-            <option value="azure">Azure Speech (recommended)</option>
+            <option value="azure_diarize">Azure Diarize (multi-speaker, recommended)</option>
+            <option value="azure">Azure Speech (single speaker)</option>
             <option value="speechmatics">Speechmatics RT</option>
           </select>
         </div>
@@ -367,7 +368,8 @@ async function loadSettings() {
     const d = await r.json();
 
     document.getElementById('translationProvider').textContent =
-      (d.STT_PROVIDER || 'azure') === 'azure' ? 'Azure Speech' : 'Speechmatics';
+      (d.STT_PROVIDER || 'azure_diarize') === 'azure_diarize' ? 'Azure Diarize' :
+      (d.STT_PROVIDER || 'azure_diarize') === 'azure' ? 'Azure Speech' : 'Speechmatics';
     document.getElementById('ttsProvider').textContent =
       (d.TTS_PROVIDER || 'azure').charAt(0).toUpperCase() + (d.TTS_PROVIDER || 'azure').slice(1);
 

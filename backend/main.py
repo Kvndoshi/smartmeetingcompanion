@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import struct
 import time
 from contextlib import asynccontextmanager
 
@@ -24,6 +25,7 @@ from services.speechmatics_client import SpeechmaticsClient
 from services.minimax_client import MinimaxClient, get_language_name
 from services.speechmatics_tts_client import SpeechmaticsTTSClient
 from services.azure_translation_client import AzureTranslationClient
+from services.azure_conversation_client import AzureConversationClient
 from services.azure_tts_client import AzureTtsClient
 from services.profile_store import init_db, get_profile, upsert_profile, update_voice_profile, set_voice_status, list_profiles
 
@@ -254,13 +256,13 @@ async def websocket_translate(ws: WebSocket):
     )
 
     stt_provider = os.getenv("STT_PROVIDER", "azure").strip().lower() or "azure"
-    if stt_provider not in {"azure", "speechmatics"}:
+    if stt_provider not in {"azure", "azure_diarize", "speechmatics"}:
         stt_provider = "azure"
 
     azure_key = os.getenv("AZURE_SPEECH_KEY", "")
     azure_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
 
-    stt_client: SpeechmaticsClient | AzureTranslationClient | None = None
+    stt_client: SpeechmaticsClient | AzureTranslationClient | AzureConversationClient | None = None
     minimax = MinimaxClient(api_key=minimax_key, group_id=minimax_group_id)
     speechmatics_tts = SpeechmaticsTTSClient(api_key=speechmatics_key)
     azure_tts = AzureTtsClient(api_key=azure_key, region=azure_region)
@@ -268,8 +270,10 @@ async def websocket_translate(ws: WebSocket):
 
     # Buffer for accumulating transcript before translation
     transcript_buffer = ""
-    translation_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+    translation_queue: asyncio.Queue[str | None] = asyncio.Queue()
     translation_worker_task: asyncio.Task | None = None
+    translation_lock = asyncio.Lock()
+    sentence_counter = 0  # alternates voices for multi-speaker
 
     async def safe_send_json(payload: dict) -> bool:
         nonlocal connection_open
@@ -294,27 +298,28 @@ async def websocket_translate(ws: WebSocket):
             return False
 
     async def enqueue_translation(text: str) -> None:
-        if not text.strip() or not connection_open:
+        if not text.strip():
             return
-        # Keep queue low-latency by dropping stale pending items.
-        while not translation_queue.empty():
-            try:
-                translation_queue.get_nowait()
-                translation_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+        if not connection_open:
+            return
         await translation_queue.put(text.strip())
+        logger.info("[Queue] enqueued (depth=%d): %s", translation_queue.qsize(), text[:60])
 
     async def translation_worker() -> None:
         while True:
             item = await translation_queue.get()
             try:
                 if item is None:
+                    logger.info("[Queue] worker got stop signal")
                     return
-                if stt_provider == "azure" or use_speechmatics_translation:
+                logger.info("[Queue] processing: %s", item[:60])
+                if stt_provider in {"azure", "azure_diarize"} or use_speechmatics_translation:
                     await speak_translated_text(item)
                 else:
                     await translate_and_speak(item)
+            except Exception as e:
+                # Never let a single failure crash the worker — log and continue.
+                logger.error("translation_worker error (will continue): %s", e)
             finally:
                 translation_queue.task_done()
 
@@ -335,7 +340,7 @@ async def websocket_translate(ws: WebSocket):
                 return
 
             if is_final and text.strip():
-                if stt_provider == "azure" or use_speechmatics_translation:
+                if stt_provider in {"azure", "azure_diarize"} or use_speechmatics_translation:
                     return
 
                 transcript_buffer += " " + text.strip()
@@ -350,19 +355,29 @@ async def websocket_translate(ws: WebSocket):
             logger.error("Error in on_transcript: %s", e)
 
     async def on_translation(text: str, is_final: bool):
-        """Called when Speechmatics produces translated text."""
+        """Called when translation produces translated text.
+
+        Partials are shown in the UI for live visual feedback.
+        Only finals are sent to TTS — this avoids word repetition
+        (Azure revises partials) and audio ticks from short fragments.
+        Short segmentation ensures finals arrive quickly (~5-8 words).
+        """
+        nonlocal sentence_counter
         if not connection_open:
             return
 
         try:
             if is_final:
+                sentence_counter += 1
                 sent = await safe_send_json({
                     "type": "translated_text",
                     "text": text,
                 })
                 if not sent:
                     return
-                await enqueue_translation(text)
+                # Enqueue the complete final text for TTS
+                if text.strip():
+                    await enqueue_translation(text.strip())
             else:
                 await safe_send_json({
                     "type": "translated_text_partial",
@@ -371,6 +386,18 @@ async def websocket_translate(ws: WebSocket):
         except (ConnectionError, RuntimeError) as e:
             logger.error("Error in on_translation: %s", e)
 
+    def _pad_wav_silence(wav_data: bytes, silence_ms: int = 150) -> bytes:
+        """Append silence to a 16kHz 16-bit mono WAV for natural sentence breaks."""
+        if len(wav_data) < 44 or silence_ms <= 0:
+            return wav_data
+        silence_bytes = int(16000 * 2 * silence_ms / 1000)
+        result = bytearray(wav_data)
+        # Update RIFF chunk size (offset 4) and data subchunk size (offset 40)
+        struct.pack_into('<I', result, 4, struct.unpack('<I', result[4:8])[0] + silence_bytes)
+        struct.pack_into('<I', result, 40, struct.unpack('<I', result[40:44])[0] + silence_bytes)
+        result.extend(b'\x00' * silence_bytes)
+        return bytes(result)
+
     async def synthesize_tts_streaming(translated_text: str) -> None:
         """Synthesize TTS and stream audio chunks to client as they arrive."""
         if not connection_open or not translated_text.strip():
@@ -378,30 +405,28 @@ async def websocket_translate(ws: WebSocket):
 
         gender_hint: str | None = None
         speaker_id: str | None = None
-        if isinstance(stt_client, AzureTranslationClient):
+        if isinstance(stt_client, (AzureTranslationClient, AzureConversationClient)):
             gender_hint = stt_client.last_speaker_gender
             speaker_id = stt_client.last_speaker_id
 
         try:
             if tts_provider == "azure":
-                async def on_chunk(audio_chunk: bytes) -> None:
-                    if connection_open:
-                        await safe_send_bytes(audio_chunk)
-
-                audio_data = await azure_tts.text_to_speech_streaming(
+                audio_data = await azure_tts.text_to_speech(
                     text=translated_text,
                     language=target_lang,
                     gender_hint=gender_hint,
                     speaker_id=speaker_id,
-                    on_chunk=on_chunk,
                 )
                 if audio_data:
-                    logger.info("[TTS] Streamed %d bytes total", len(audio_data))
+                    # Pad silence for natural sentence breaks
+                    audio_data = _pad_wav_silence(audio_data, silence_ms=150)
+                    sent = await safe_send_bytes(audio_data)
+                    if sent:
+                        logger.info("[TTS] Sent %d bytes of audio for: %s", len(audio_data), translated_text[:60])
                     return
                 logger.warning(
-                    "Azure TTS returned no audio for target language '%s'; "
-                    "falling back to MiniMax TTS.",
-                    target_lang,
+                    "[TTS] Azure returned no audio for '%s' (target=%s) — falling back",
+                    translated_text[:60], target_lang,
                 )
 
             if tts_provider == "speechmatics":
@@ -425,8 +450,8 @@ async def websocket_translate(ws: WebSocket):
                 if sent:
                     logger.info("[TTS] Sent %d bytes of audio (MiniMax)", len(audio_data))
 
-        except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
-            logger.error("TTS error: %s", e)
+        except Exception as e:
+            logger.error("TTS synthesis error: %s", e)
             await safe_send_json({
                 "type": "error",
                 "message": str(e),
@@ -440,7 +465,7 @@ async def websocket_translate(ws: WebSocket):
         try:
             logger.info("[Translate] → %s", translated_text)
             await synthesize_tts_streaming(translated_text)
-        except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
+        except Exception as e:
             logger.error("TTS error: %s", e)
             await safe_send_json({
                 "type": "error",
@@ -543,8 +568,12 @@ async def websocket_translate(ws: WebSocket):
                     source_lang = msg.get("source_lang", "en")
                     target_lang = msg.get("target_lang", "es")
                     requested_tts_provider = str(msg.get("tts_provider", "")).strip().lower()
-                    if requested_tts_provider in {"minimax", "speechmatics", "azure"}:
+                    if requested_tts_provider in {"minimax", "azure"}:
                         tts_provider = requested_tts_provider
+                    # Force Azure TTS for streaming — speechmatics is non-streaming (slow)
+                    if tts_provider != "azure":
+                        tts_provider = "azure"
+                    sentence_counter = 0
                     logger.info("Config: %s → %s", source_lang, target_lang)
                     logger.info("STT provider: %s  TTS provider: %s", stt_provider, tts_provider)
 
@@ -553,6 +582,15 @@ async def websocket_translate(ws: WebSocket):
 
                     if stt_provider == "azure":
                         stt_client = AzureTranslationClient(
+                            api_key=azure_key,
+                            region=azure_region,
+                            language=source_lang,
+                            target_language=target_lang,
+                            on_transcript=on_transcript,
+                            on_translation=on_translation,
+                        )
+                    elif stt_provider == "azure_diarize":
+                        stt_client = AzureConversationClient(
                             api_key=azure_key,
                             region=azure_region,
                             language=source_lang,
@@ -599,17 +637,13 @@ async def websocket_translate(ws: WebSocket):
         connection_open = False
 
         if translation_worker_task:
-            while not translation_queue.empty():
-                try:
-                    translation_queue.get_nowait()
-                    translation_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
+            # Signal worker to stop after processing remaining items.
+            # Do NOT drain the queue — let the worker finish what's pending.
             await translation_queue.put(None)
             try:
-                await translation_worker_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(translation_worker_task, timeout=15.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning("translation_worker did not finish in time")
 
         if stt_client:
             await stt_client.close()
