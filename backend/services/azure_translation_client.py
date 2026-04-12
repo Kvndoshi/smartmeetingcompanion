@@ -70,6 +70,7 @@ class AzureTranslationClient:
 
         self.is_connected = False
         self.last_speaker_gender: str | None = None
+        self.last_speaker_id: str | None = None
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._push_stream: speechsdk.audio.PushAudioInputStream | None = None
@@ -190,9 +191,13 @@ class AzureTranslationClient:
         raw = evt.result.properties.get(
             speechsdk.PropertyId.SpeechServiceResponse_JsonResult
         )
-        gender = self._parse_gender(raw or "")
+        raw_str = raw or ""
+        gender = self._parse_gender(raw_str)
         if gender:
             self.last_speaker_gender = gender
+        speaker_id = self._parse_speaker_id(raw_str)
+        if speaker_id:
+            self.last_speaker_id = speaker_id
 
     def _emit(self, transcript: str, translation: str, is_final: bool) -> None:
         if self._loop is None:
@@ -232,4 +237,28 @@ class AzureTranslationClient:
             normalized = raw.strip().lower()
             if normalized in {"male", "female"}:
                 return normalized
+        return None
+
+    @staticmethod
+    def _parse_speaker_id(raw_json: str) -> str | None:
+        """Best-effort speaker ID extraction from Azure detailed JSON result."""
+        if not raw_json:
+            return None
+        try:
+            payload = json.loads(raw_json)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        sid = payload.get("SpeakerId")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+        # Some results put it inside NBest
+        nbest = payload.get("NBest")
+        if isinstance(nbest, list) and nbest:
+            first = nbest[0]
+            if isinstance(first, dict):
+                sid = first.get("SpeakerId")
+                if isinstance(sid, str) and sid.strip():
+                    return sid.strip()
         return None

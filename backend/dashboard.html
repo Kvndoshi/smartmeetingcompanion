@@ -139,6 +139,33 @@
   .btn:active { transform: scale(0.98); }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-row { display: flex; gap: 10px; margin-top: 16px; }
+  .btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+  .btn.secondary:hover { background: var(--border); }
+  .btn.danger { background: var(--red); }
+  .btn.danger:hover { background: #c0392b; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .translation-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    background: var(--surface-2);
+    border-radius: 8px;
+    margin-top: 16px;
+  }
+  .translation-status .indicator {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .translation-status .indicator.active {
+    background: var(--green);
+    animation: pulse 1.5s infinite;
+  }
+  .translation-status .label {
+    font-size: 14px;
+    font-weight: 500;
+  }
   .toast {
     position: fixed;
     bottom: 24px;
@@ -247,15 +274,16 @@
     <div class="card-body">
       <div class="row">
         <div class="field">
-          <label>Translation Engine</label>
-          <select id="translationEngine">
-            <option value="1">Speechmatics RT (recommended)</option>
-            <option value="0">MiniMax M2</option>
+          <label>STT Engine</label>
+          <select id="sttEngine">
+            <option value="azure">Azure Speech (recommended)</option>
+            <option value="speechmatics">Speechmatics RT</option>
           </select>
         </div>
         <div class="field">
           <label>TTS Engine</label>
           <select id="ttsEngine">
+            <option value="azure">Azure Neural TTS (recommended)</option>
             <option value="speechmatics">Speechmatics TTS</option>
             <option value="minimax">MiniMax Speech</option>
           </select>
@@ -268,13 +296,17 @@
           <div class="hint">Lower = faster response, higher = more stable text</div>
         </div>
         <div class="field">
-          <label>Max Delay (seconds)</label>
-          <input type="text" id="maxDelay" value="1.0" placeholder="1.0">
-          <div class="hint">Speechmatics finalization speed</div>
+          <label>Segmentation Silence (ms)</label>
+          <input type="text" id="maxDelay" value="500" placeholder="500">
+          <div class="hint">Azure endpointing — lower = snappier finals</div>
         </div>
       </div>
       <div class="btn-row">
         <button class="btn" onclick="saveSettings()">Save Settings</button>
+      </div>
+      <div class="translation-status" id="translationStatus">
+        <div class="indicator" id="translationIndicator"></div>
+        <span class="label" id="translationLabel">Idle — start a session from the extension</span>
       </div>
     </div>
   </div>
@@ -335,9 +367,9 @@ async function loadSettings() {
     const d = await r.json();
 
     document.getElementById('translationProvider').textContent =
-      d.USE_SPEECHMATICS_TRANSLATION === '1' ? 'Speechmatics RT' : 'MiniMax';
+      (d.STT_PROVIDER || 'azure') === 'azure' ? 'Azure Speech' : 'Speechmatics';
     document.getElementById('ttsProvider').textContent =
-      (d.TTS_PROVIDER || 'speechmatics').charAt(0).toUpperCase() + (d.TTS_PROVIDER || 'speechmatics').slice(1);
+      (d.TTS_PROVIDER || 'azure').charAt(0).toUpperCase() + (d.TTS_PROVIDER || 'azure').slice(1);
 
     if (d._keys_configured) {
       document.getElementById('keysStatus').textContent = 'Configured';
@@ -351,10 +383,10 @@ async function loadSettings() {
       document.getElementById('keysBadge').textContent = 'not set';
     }
 
-    document.getElementById('translationEngine').value = d.USE_SPEECHMATICS_TRANSLATION || '1';
-    document.getElementById('ttsEngine').value = d.TTS_PROVIDER || 'speechmatics';
+    document.getElementById('sttEngine').value = d.STT_PROVIDER || 'azure';
+    document.getElementById('ttsEngine').value = d.TTS_PROVIDER || 'azure';
     document.getElementById('chunkThreshold').value = d.TRANSLATION_TRIGGER_CHAR_THRESHOLD || '24';
-    document.getElementById('maxDelay').value = d.SPEECHMATICS_MAX_DELAY || '1.0';
+    document.getElementById('maxDelay').value = d.AZURE_SEGMENTATION_SILENCE_MS || d.SPEECHMATICS_MAX_DELAY || '500';
   } catch {}
 }
 
@@ -386,10 +418,10 @@ async function saveKeys() {
 
 async function saveSettings() {
   const settings = {
-    USE_SPEECHMATICS_TRANSLATION: document.getElementById('translationEngine').value,
+    STT_PROVIDER: document.getElementById('sttEngine').value,
     TTS_PROVIDER: document.getElementById('ttsEngine').value,
     TRANSLATION_TRIGGER_CHAR_THRESHOLD: document.getElementById('chunkThreshold').value,
-    SPEECHMATICS_MAX_DELAY: document.getElementById('maxDelay').value,
+    AZURE_SEGMENTATION_SILENCE_MS: document.getElementById('maxDelay').value,
   };
   try {
     await fetch(API + '/api/settings', {

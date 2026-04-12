@@ -46,3 +46,23 @@ def test_pick_voice_env_override(monkeypatch: pytest.MonkeyPatch):
 def test_pick_voice_case_insensitive_gender(client: AzureTtsClient):
     assert client._pick_voice("en", "MALE") == "en-US-SteffanNeural"
     assert client._pick_voice("en", "Female") == "en-US-JennyNeural"
+
+
+def test_speaker_rotation_en(client: AzureTtsClient):
+    # Speaker 1 → pool[0] = Steffan, Speaker 2 → pool[1] = Jenny
+    assert client._pick_voice("en", speaker_id="1") == "en-US-SteffanNeural"
+    assert client._pick_voice("en", speaker_id="2") == "en-US-JennyNeural"
+    assert client._pick_voice("en", speaker_id="3") == "en-US-AriaNeural"
+    assert client._pick_voice("en", speaker_id="4") == "en-US-GuyNeural"
+    # Wraps around
+    assert client._pick_voice("en", speaker_id="5") == "en-US-SteffanNeural"
+
+
+def test_speaker_rotation_zh(client: AzureTtsClient):
+    assert client._pick_voice("zh", speaker_id="1") == "zh-CN-YunxiNeural"
+    assert client._pick_voice("zh", speaker_id="2") == "zh-CN-XiaoxiaoNeural"
+
+
+def test_speaker_rotation_ignores_gender_when_speaker_set(client: AzureTtsClient):
+    # When speaker_id is given, pool rotation takes priority over gender
+    assert client._pick_voice("en", gender_hint="female", speaker_id="1") == "en-US-SteffanNeural"

@@ -268,7 +268,6 @@ async def websocket_translate(ws: WebSocket):
 
     # Buffer for accumulating transcript before translation
     transcript_buffer = ""
-    translation_lock = asyncio.Lock()
     translation_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
     translation_worker_task: asyncio.Task | None = None
 
@@ -372,63 +371,81 @@ async def websocket_translate(ws: WebSocket):
         except (ConnectionError, RuntimeError) as e:
             logger.error("Error in on_translation: %s", e)
 
-    async def synthesize_tts(translated_text: str) -> bytes | None:
+    async def synthesize_tts_streaming(translated_text: str) -> None:
+        """Synthesize TTS and stream audio chunks to client as they arrive."""
+        if not connection_open or not translated_text.strip():
+            return
+
         gender_hint: str | None = None
+        speaker_id: str | None = None
         if isinstance(stt_client, AzureTranslationClient):
             gender_hint = stt_client.last_speaker_gender
+            speaker_id = stt_client.last_speaker_id
 
-        if tts_provider == "azure":
-            audio_data = await azure_tts.text_to_speech(
-                text=translated_text,
-                language=target_lang,
-                gender_hint=gender_hint,
-            )
-            if audio_data:
-                return audio_data
-            logger.warning(
-                "Azure TTS returned no audio for target language '%s'; "
-                "falling back to MiniMax TTS.",
-                target_lang,
-            )
+        try:
+            if tts_provider == "azure":
+                async def on_chunk(audio_chunk: bytes) -> None:
+                    if connection_open:
+                        await safe_send_bytes(audio_chunk)
 
-        if tts_provider == "speechmatics":
-            audio_data = await speechmatics_tts.text_to_speech(
-                text=translated_text,
-                language=target_lang,
-            )
-            if audio_data:
-                return audio_data
-            logger.warning(
-                "Speechmatics TTS returned no audio for target language '%s'; "
-                "falling back to MiniMax TTS.",
-                target_lang,
-            )
+                audio_data = await azure_tts.text_to_speech_streaming(
+                    text=translated_text,
+                    language=target_lang,
+                    gender_hint=gender_hint,
+                    speaker_id=speaker_id,
+                    on_chunk=on_chunk,
+                )
+                if audio_data:
+                    logger.info("[TTS] Streamed %d bytes total", len(audio_data))
+                    return
+                logger.warning(
+                    "Azure TTS returned no audio for target language '%s'; "
+                    "falling back to MiniMax TTS.",
+                    target_lang,
+                )
 
-        return await minimax.text_to_speech(
-            text=translated_text,
-            language=target_lang,
-        )
-
-    async def speak_translated_text(translated_text: str):
-        """Generate and send TTS audio from already-translated text."""
-        async with translation_lock:
-            if not connection_open or not translated_text.strip():
-                return
-
-            try:
-                logger.info("[Translate] (Speechmatics) → %s", translated_text)
-
-                audio_data = await synthesize_tts(translated_text)
+            if tts_provider == "speechmatics":
+                audio_data = await speechmatics_tts.text_to_speech(
+                    text=translated_text,
+                    language=target_lang,
+                )
                 if audio_data:
                     sent = await safe_send_bytes(audio_data)
                     if sent:
                         logger.info("[TTS] Sent %d bytes of audio", len(audio_data))
-            except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
-                logger.error("TTS error: %s", e)
-                await safe_send_json({
-                    "type": "error",
-                    "message": str(e),
-                })
+                    return
+
+            # Fallback to MiniMax
+            audio_data = await minimax.text_to_speech(
+                text=translated_text,
+                language=target_lang,
+            )
+            if audio_data:
+                sent = await safe_send_bytes(audio_data)
+                if sent:
+                    logger.info("[TTS] Sent %d bytes of audio (MiniMax)", len(audio_data))
+
+        except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
+            logger.error("TTS error: %s", e)
+            await safe_send_json({
+                "type": "error",
+                "message": str(e),
+            })
+
+    async def speak_translated_text(translated_text: str):
+        """Generate and stream TTS audio from already-translated text."""
+        if not connection_open or not translated_text.strip():
+            return
+
+        try:
+            logger.info("[Translate] → %s", translated_text)
+            await synthesize_tts_streaming(translated_text)
+        except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
+            logger.error("TTS error: %s", e)
+            await safe_send_json({
+                "type": "error",
+                "message": str(e),
+            })
 
     async def translate_and_speak(text: str):
         """Translate text and send back TTS audio."""
@@ -553,6 +570,20 @@ async def websocket_translate(ws: WebSocket):
                         )
                     await stt_client.connect()
                     logger.info("STT client connected: provider=%s", stt_provider)
+
+                elif msg.get("type") == "stop":
+                    logger.info("Stop requested by client")
+                    if stt_client:
+                        await stt_client.close()
+                        stt_client = None
+                    # Drain pending translation
+                    while not translation_queue.empty():
+                        try:
+                            translation_queue.get_nowait()
+                            translation_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+                    await safe_send_json({"type": "stopped"})
 
             elif "bytes" in data:
                 if stt_client and stt_client.is_connected:
