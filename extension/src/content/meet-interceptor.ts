@@ -126,6 +126,24 @@ async function setupPipeline(track: MediaStreamTrack): Promise<void> {
 
     audioCtx = new AudioContext({ sampleRate: 48000 });
 
+    // Force this AudioContext's output to the "none" sink so nothing from
+    // this graph can ever reach the user's speakers — even if Meet (or any
+    // other code) inadvertently connects something to audioCtx.destination.
+    // The translated audio still reaches remote peers because it flows
+    // through MediaStreamAudioDestinationNode, which is independent of the
+    // context's speaker sink.
+    const ctxWithSink = audioCtx as AudioContext & {
+      setSinkId?: (sinkId: string | { type: 'none' }) => Promise<void>;
+    };
+    if (typeof ctxWithSink.setSinkId === 'function') {
+      try {
+        await ctxWithSink.setSinkId({ type: 'none' });
+        console.log('[Interceptor] AudioContext sink set to "none" (silent)');
+      } catch (err) {
+        console.warn('[Interceptor] setSinkId({type:"none"}) unsupported:', err);
+      }
+    }
+
     const stream = new MediaStream([track]);
     micSource = audioCtx.createMediaStreamSource(stream);
 
@@ -231,14 +249,25 @@ let nextPlaybackTime = 0;
 const TTS_SAMPLE_RATE = 16000;
 
 /**
- * If `bytes` begins with a RIFF/WAVE header, return the offset of the 'data'
- * chunk payload. Otherwise return 0 (treat as raw PCM continuation).
+ * If `bytes` begins with a RIFF/WAVE header, return the payload offset and
+ * exact data chunk size. Otherwise return {offset: 0, size: bytes.length}
+ * (treat as raw PCM continuation, size = full buffer).
+ *
+ * Returning the exact size is important: the backend pads with 150 ms of
+ * silence and updates the data-chunk size accordingly, but there can still
+ * be trailing bytes (alignment, extra chunks) beyond the real samples. We
+ * must clamp playback to the declared data size to avoid reading stale
+ * bytes that sound like tail-end word repetition.
  */
-function stripRiffHeader(bytes: Uint8Array): number {
-  if (bytes.length < 12) return 0;
+function stripRiffHeader(bytes: Uint8Array): { offset: number; size: number } {
+  if (bytes.length < 12) return { offset: 0, size: bytes.length };
   // 'RIFF' ... 'WAVE'
-  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return 0;
-  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) return 0;
+  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) {
+    return { offset: 0, size: bytes.length };
+  }
+  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) {
+    return { offset: 0, size: bytes.length };
+  }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = 12;
@@ -248,12 +277,16 @@ function stripRiffHeader(bytes: Uint8Array): number {
     );
     const chunkSize = view.getUint32(offset + 4, true);
     if (chunkId === 'data') {
-      return offset + 8;
+      const dataStart = offset + 8;
+      const available = bytes.length - dataStart;
+      // Clamp: never read past what's actually in the buffer.
+      const size = Math.min(chunkSize, available);
+      return { offset: dataStart, size };
     }
     offset += 8 + chunkSize;
   }
   // Malformed header — skip standard 44-byte prefix as a fallback.
-  return 44;
+  return { offset: 44, size: Math.max(0, bytes.length - 44) };
 }
 
 function playTranslated(audioBytes: number[]): void {
@@ -263,8 +296,7 @@ function playTranslated(audioBytes: number[]): void {
   }
 
   const bytes = new Uint8Array(audioBytes);
-  const pcmOffset = stripRiffHeader(bytes);
-  const pcmByteLength = bytes.length - pcmOffset;
+  const { offset: pcmOffset, size: pcmByteLength } = stripRiffHeader(bytes);
 
   if (pcmByteLength < 2) {
     console.warn('[Interceptor] playTranslated: empty PCM payload');
@@ -295,7 +327,7 @@ function playTranslated(audioBytes: number[]): void {
     console.log(
       '[Interceptor] Playing translated chunk:',
       buffer.duration.toFixed(2), 's',
-      pcmOffset > 0 ? '(RIFF header stripped)' : '(raw PCM)'
+      pcmOffset > 0 ? '(RIFF stripped, data=' + pcmByteLength + 'B)' : '(raw PCM)'
     );
   } catch (err) {
     console.error('[Interceptor] PCM playback failed:', err);
