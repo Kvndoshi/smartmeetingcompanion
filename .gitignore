@@ -30,3 +30,6 @@ Thumbs.db
 backend/fixtures/*.wav
 backend/fixtures/reference.txt
 backend/reports/
+
+# Personal Claude Code settings (may hold tokens)
+.claude/settings.local.json
