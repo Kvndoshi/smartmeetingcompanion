@@ -1,51 +1,63 @@
 flowchart TB
-    subgraph Chrome["Chrome Browser"]
-        TAB["🎙️ Tab Audio<br/>Google Meet / YouTube"]
-        EXT["🔌 Chrome Extension<br/>(popup + service worker)"]
-        OFS["🔈 Offscreen Document<br/>Audio capture + playback"]
-        OUT["🎧 Selected Output Device"]
+    subgraph Browser["Chrome / Edge"]
+        TAB["🎙️ Meeting tab<br/>Meet · Teams · Zoom web · YouTube"]
+        POP["Popup<br/>modes · languages · providers"]
+        PANEL["Side panel<br/>Live · Summary · Ask · Meetings"]
+        WIDGET["Meet widget<br/>+ voice interceptor (WebRTC)"]
+        SW["Service worker<br/>sessions · state · broadcasts"]
+        OFS["Offscreen document<br/>tabCapture + mic → PCM 16k<br/>translated playback"]
+        OUT["🎧 Output device"]
     end
 
-    subgraph Backend["FastAPI Backend (localhost:8000)"]
-        WS["WebSocket Endpoint<br/>/ws/translate"]
-        DASH["Dashboard<br/>/"]
-        HEALTH["Health Check<br/>/health"]
-        PROFILES["Profile API<br/>/api/profiles<br/>/api/voice-profile"]
-        DB[("SQLite<br/>profiles.db")]
-
-        WS --> STT_SEL{{"STT_PROVIDER"}}
-        STT_SEL -->|"azure<br/>(default)"| AZ_STT
-        STT_SEL -->|"speechmatics"| SM_STT
-
-        WS --> TTS_SEL{{"TTS_PROVIDER"}}
-        TTS_SEL -->|"azure<br/>(default)"| AZ_TTS
-        TTS_SEL -->|"minimax"| MM_TTS
-        TTS_SEL -->|"speechmatics"| SM_TTS
+    subgraph Backend["FastAPI backend · localhost:8000"]
+        WS["/ws/translate<br/>LiveSession"]
+        REST["REST API<br/>meetings · summarize · chat · providers"]
+        REG{{"Provider registry<br/>key-based defaults"}}
+        STORE[("SQLite<br/>meetings · segments · chat · FTS5")]
+        SUMM["Summarizer<br/>JSON schema · map-reduce"]
+        CHAT["Chat (SSE)<br/>meeting context · cross-meeting search"]
+        DASH["Dashboard /<br/>keys & settings"]
     end
 
-    subgraph Azure["Azure Speech Services"]
-        AZ_STT["AzureTranslationClient<br/>or<br/>AzureConversationClient"]
-        AZ_TTS["AzureTtsClient<br/>Speech Synthesis"]
+    subgraph STT["Speech-to-text"]
+        SONIOX["Soniox<br/>diarization + translation"]
+        DG["Deepgram<br/>diarization"]
+        SMX["Speechmatics"]
+        AZS["Azure Speech"]
     end
 
-    subgraph AltProviders["Alternative Providers"]
-        SM_STT["Speechmatics RT<br/>STT + Translation"]
-        MM_TTS["MiniMax TTS"]
-        SM_TTS["Speechmatics TTS"]
+    subgraph TTS["Text-to-speech"]
+        TTSP["Soniox · Azure · Deepgram<br/>MiniMax · Speechmatics"]
     end
 
-    TAB -->|"audio stream"| OFS
-    OFS -->|"PCM 16k<br/>audio chunks"| EXT
-    EXT -->|"WebSocket<br/>binary send"| WS
+    subgraph LLM["LLM"]
+        GEM["Gemini"]
+        GROQ["Groq"]
+    end
 
-    AZ_STT -->|"recognized +<br/>translated text"| WS
-    AZ_TTS -->|"translated<br/>audio bytes"| WS
-    SM_STT -->|"transcript +<br/>translation"| WS
-    MM_TTS -->|"audio bytes"| WS
-    SM_TTS -->|"audio bytes"| WS
+    MEM[("Supermemory<br/>one doc per meeting")]
 
-    WS -->|"websocket<br/>binary audio"| EXT
-    EXT -->|"translated-audio"| OFS
-    OFS -->|"setSinkId<br/>playback"| OUT
+    TAB -->|"tab audio"| OFS
+    OFS -->|"PCM chunks"| SW
+    WIDGET -->|"your mic PCM (Meet)"| SW
+    POP --> SW
+    PANEL --> SW
+    SW <-->|"WebSocket<br/>config · PCM · transcript · WAV"| WS
+    SW -->|"translated WAV"| OFS
+    OFS --> OUT
+    SW -.->|"broadcast state / transcript"| PANEL
+    SW -.-> WIDGET
+    PANEL <-->|"HTTP"| REST
 
-    PROFILES --> DB
+    WS --> REG
+    REG --> STT
+    REG --> TTS
+    REG --> LLM
+    WS --> STORE
+    REST --> STORE
+    REST --> SUMM
+    REST --> CHAT
+    SUMM --> LLM
+    CHAT --> LLM
+    CHAT --> MEM
+    STORE -->|"checkpoint + on end"| MEM

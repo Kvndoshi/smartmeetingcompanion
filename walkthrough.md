@@ -1,5 +1,7 @@
 # Walkthrough — Interpreter Live Translation Extension
 
+> **Historical:** this describes the original Speechmatics/MiniMax prototype. For the current system see [README.md](README.md), [architecture.md](architecture.md) and [TESTING.md](TESTING.md).
+
 ## What Was Built
 
 A Chrome extension + FastAPI backend for real-time speaker translation. The pipeline:
