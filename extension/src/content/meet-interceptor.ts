@@ -28,6 +28,13 @@ let active = false;
 let realTrack: MediaStreamTrack | null = null;
 const senders = new Set<RTCRtpSender>();
 const peerConnections = new Set<RTCPeerConnection>();
+// The track Meet itself asked each sender to carry (null = muted / detached).
+// Activation only redirects senders whose intended track is the mic, and
+// deactivation puts exactly this back — so we never "unmute" anyone.
+const intended = new WeakMap<RTCRtpSender, MediaStreamTrack | null>();
+// Tracks that are never the microphone.
+const displayTracks = new WeakSet<MediaStreamTrack>(); // screen / tab share audio
+const replacementTracks = new WeakSet<MediaStreamTrack>(); // our translated outputs, current and past
 
 // Audio pipeline nodes
 let audioCtx: AudioContext | null = null;
@@ -177,6 +184,8 @@ async function buildPipeline(track: MediaStreamTrack): Promise<void> {
 
       const downsampled = downsampleBuffer(inputData, audioCtx.sampleRate, 16000);
       const pcm = floatTo16BitPCM(downsampled);
+      // Muted in Meet (sender detached): keep the stream alive with silence, never your words.
+      if (!isSendingTranslation()) pcm.fill(0);
       const buffer = pcm.buffer.slice(0) as ArrayBuffer;
       postOut({ type: 'interpreter-mic-pcm', data: buffer }, [buffer]);
     };
@@ -192,6 +201,7 @@ async function buildPipeline(track: MediaStreamTrack): Promise<void> {
       throw new Error('[Interceptor] MediaStreamDestination produced no audio tracks');
     }
     replacementTrack = destTracks[0];
+    replacementTracks.add(replacementTrack);
     pipelineTrack = track;
 
     // Mirror enabled (mute) state from the real track
@@ -347,22 +357,24 @@ function pruneClosed(): void {
   for (const s of senders) if (!live.has(s)) senders.delete(s);
 }
 
-function isUsableTrack(track: MediaStreamTrack | null): track is MediaStreamTrack {
-  return !!track && track.readyState === 'live' && track !== replacementTrack;
+/** An audio track captured from a microphone — not screen-share audio, not our own output. */
+function isMicTrack(track: MediaStreamTrack | null | undefined): boolean {
+  return !!track && track.kind === 'audio' && !displayTracks.has(track) && !replacementTracks.has(track);
 }
 
+function isUsableTrack(track: MediaStreamTrack | null | undefined): track is MediaStreamTrack {
+  return !!track && isMicTrack(track) && track.readyState === 'live';
+}
+
+/** Adopt senders Meet set up before we saw them (only ones carrying the mic). */
 function discoverAudioSenders(): void {
   pruneClosed();
   for (const pc of peerConnections) {
     try {
       for (const sender of pc.getSenders()) {
-        if (sender.track?.kind !== 'audio') continue;
+        if (senders.has(sender) || !isMicTrack(sender.track)) continue;
         senders.add(sender);
-        // Prefer a live mic track (never our own replacement) as the source.
-        if (!isUsableTrack(realTrack) && isUsableTrack(sender.track)) {
-          realTrack = sender.track;
-          console.log('[Interceptor] Captured realTrack from sender:', realTrack.label);
-        }
+        intended.set(sender, sender.track);
       }
     } catch {
       // PC might be closed
@@ -370,26 +382,50 @@ function discoverAudioSenders(): void {
   }
 }
 
-/** Point every tracked audio sender at `track`. */
-async function swapAllSenders(track: MediaStreamTrack | null): Promise<void> {
-  pruneClosed();
-  await Promise.all(
-    [...senders].map((sender) =>
-      sender.track === track
-        ? Promise.resolve()
-        : _origReplaceTrack.call(sender, track).catch((err: Error) => {
-            console.error('[Interceptor] replaceTrack failed:', err);
-          })
-    )
-  );
+/** The mic Meet is actually sending; falls back to the last getUserMedia mic. */
+function currentMicTrack(): MediaStreamTrack | null {
+  for (const sender of senders) {
+    const track = intended.get(sender);
+    if (isUsableTrack(track)) return track;
+  }
+  return isUsableTrack(realTrack) ? realTrack : null;
 }
 
-/** (Re)build the pipeline for `track` and route every sender to the translated output. */
+/** True while at least one sender is carrying the translated track to the call. */
+function isSendingTranslation(): boolean {
+  if (!replacementTrack) return false;
+  for (const sender of senders) if (sender.track === replacementTrack) return true;
+  return false;
+}
+
+async function replaceOn(sender: RTCRtpSender, track: MediaStreamTrack | null): Promise<void> {
+  if (sender.track === track) return;
+  try {
+    await _origReplaceTrack.call(sender, track);
+  } catch (err) {
+    console.error('[Interceptor] replaceTrack failed:', err);
+  }
+}
+
+/** Send `track` on every sender Meet is using for the mic. Muted (null) senders stay muted. */
+async function routeMicSendersTo(track: MediaStreamTrack): Promise<void> {
+  pruneClosed();
+  await Promise.all([...senders].filter((s) => isMicTrack(intended.get(s))).map((s) => replaceOn(s, track)));
+}
+
+/** Put back exactly what Meet asked each sender to carry. */
+async function restoreMeetTracks(): Promise<void> {
+  pruneClosed();
+  await Promise.all([...senders].filter((s) => intended.has(s)).map((s) => replaceOn(s, intended.get(s) ?? null)));
+}
+
+/** (Re)build the pipeline for `track` and route the mic senders to the translated output. */
 async function rewire(track: MediaStreamTrack): Promise<void> {
   await setupPipeline(track);
   if (!active) return;
   // If the pipeline couldn't be built, fall back to the real mic rather than silence.
-  await swapAllSenders(replacementTrack ?? track);
+  if (replacementTrack) await routeMicSendersTo(replacementTrack);
+  else await restoreMeetTracks();
 }
 
 function postActivationResult(ok: boolean, message?: string): void {
@@ -405,31 +441,37 @@ async function activate(): Promise<void> {
   // Discover any senders we might have missed (e.g. from addTransceiver)
   discoverAudioSenders();
 
-  if (!isUsableTrack(realTrack)) {
+  const notInCall = 'Join the call with your microphone on first, then turn on voice translation.';
+  const mic = currentMicTrack();
+  if (!mic) {
     console.warn('[Interceptor] No live microphone track found');
     active = false;
-    postActivationResult(false, 'Join the call with your microphone on first, then turn on voice translation.');
+    postActivationResult(false, notInCall);
     return;
   }
+  realTrack = mic;
 
-  await rewire(realTrack);
+  await rewire(mic);
   if (!active) return; // deactivated while the pipeline was building
-  if (replacementTrack) {
+  const mutedInCall = [...senders].some((s) => intended.get(s) === null);
+  if (replacementTrack && (isSendingTranslation() || mutedInCall)) {
     console.log('[Interceptor] Routing', senders.size, 'sender(s) through the translated track');
     postActivationResult(true);
   } else {
     active = false;
-    await swapAllSenders(realTrack);
-    postActivationResult(false, "Couldn't attach to your microphone in this call.");
+    await restoreMeetTracks();
+    postActivationResult(false, replacementTrack ? notInCall : "Couldn't attach to your microphone in this call.");
   }
 }
 
 async function deactivate(): Promise<void> {
   console.log('[Interceptor] Deactivating outgoing translation');
+  const wasActive = active;
   active = false;
 
-  // Swap senders back to the real track before tearing down the pipeline
-  if (isUsableTrack(realTrack)) await swapAllSenders(realTrack);
+  // Put Meet's own tracks back before tearing down the pipeline. Never touch
+  // senders when translation wasn't running (notes-only mode leaves the call alone).
+  if (wasActive || replacementTrack) await restoreMeetTracks();
 
   await pipelineLock;
   teardownPipeline();
@@ -441,6 +483,7 @@ async function deactivate(): Promise<void> {
 const _origAddTrack = RTCPeerConnection.prototype.addTrack;
 const _origAddTransceiver = RTCPeerConnection.prototype.addTransceiver;
 const _origReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+const _origRemoveTrack = RTCPeerConnection.prototype.removeTrack;
 
 // Track all peer connections for sender discovery
 const _origPCConstructor = window.RTCPeerConnection;
@@ -465,16 +508,23 @@ RTCPeerConnection.prototype.addTrack = function (
   track: MediaStreamTrack,
   ...streams: MediaStream[]
 ): RTCRtpSender {
-  if (track.kind !== 'audio' || track === replacementTrack) {
-    return _origAddTrack.call(this, track, ...streams);
+  if (!isMicTrack(track)) {
+    return _origAddTrack.call(this, track, ...streams); // video, screen-share audio, our own output
   }
 
   realTrack = track;
   const sending = trackToSend(track);
   const sender = _origAddTrack.call(this, sending, ...streams);
   senders.add(sender);
+  intended.set(sender, track);
   if (active && sending !== replacementTrack) void rewire(track);
   return sender;
+};
+
+// Patch removeTrack — the sender stops carrying the mic; never put it back.
+RTCPeerConnection.prototype.removeTrack = function (sender: RTCRtpSender): void {
+  if (intended.has(sender)) intended.set(sender, null);
+  return _origRemoveTrack.call(this, sender);
 };
 
 // Patch addTransceiver — Google Meet uses this instead of addTrack. A kind-only
@@ -484,7 +534,7 @@ RTCPeerConnection.prototype.addTransceiver = function (
   trackOrKind: MediaStreamTrack | string,
   init?: RTCRtpTransceiverInit
 ): RTCRtpTransceiver {
-  if (!(trackOrKind instanceof MediaStreamTrack) || trackOrKind.kind !== 'audio' || trackOrKind === replacementTrack) {
+  if (!(trackOrKind instanceof MediaStreamTrack) || !isMicTrack(trackOrKind)) {
     return _origAddTransceiver.call(this, trackOrKind, init);
   }
 
@@ -493,20 +543,32 @@ RTCPeerConnection.prototype.addTransceiver = function (
   const sending = trackToSend(track);
   const transceiver = _origAddTransceiver.call(this, sending, init);
   senders.add(transceiver.sender);
+  intended.set(transceiver.sender, track);
   if (active && sending !== replacementTrack) void rewire(track);
   return transceiver;
 };
 
-// Patch replaceTrack on RTCRtpSender (Meet uses it for mic switches / unmute)
+// Patch replaceTrack on RTCRtpSender (Meet uses it for mic switches / mute / unmute)
 RTCRtpSender.prototype.replaceTrack = function (
   newTrack: MediaStreamTrack | null
 ): Promise<void> {
-  if (!newTrack || newTrack.kind !== 'audio' || newTrack === replacementTrack) {
+  if (!newTrack) {
+    // Meet muting or detaching this sender: remember it so we never "unmute" it.
+    if (senders.has(this)) intended.set(this, null);
+    return _origReplaceTrack.call(this, null);
+  }
+  if (!isMicTrack(newTrack)) {
+    // Video or screen-share audio: not the mic, so this sender isn't ours to touch.
+    if (newTrack.kind === 'audio') {
+      senders.delete(this);
+      intended.delete(this);
+    }
     return _origReplaceTrack.call(this, newTrack);
   }
 
   realTrack = newTrack;
   senders.add(this);
+  intended.set(this, newTrack);
   if (!active) return _origReplaceTrack.call(this, newTrack);
 
   // Rebuild for the new mic, then point every sender (including this one) at
@@ -527,17 +589,38 @@ navigator.mediaDevices.getUserMedia = async function (
   constraints?: MediaStreamConstraints
 ): Promise<MediaStream> {
   const stream = await _origGetUserMedia(constraints);
+  const audioTracks = stream.getAudioTracks();
+  if (audioTracks.length === 0) return stream;
 
-  // Check if this was an audio request
-  if (constraints?.audio) {
-    const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length > 0) {
-      console.log('[Interceptor] getUserMedia returned audio track:', audioTracks[0].label);
-      realTrack = audioTracks[0];
-    }
+  // Legacy screen/tab capture goes through getUserMedia with chromeMediaSource.
+  const audio = constraints?.audio as { mandatory?: { chromeMediaSource?: string }; chromeMediaSource?: string } | boolean | undefined;
+  const isScreen = typeof audio === 'object' && !!(audio.mandatory?.chromeMediaSource || audio.chromeMediaSource);
+  if (isScreen) {
+    for (const track of audioTracks) displayTracks.add(track);
+  } else {
+    console.log('[Interceptor] getUserMedia returned audio track:', audioTracks[0].label);
+    realTrack = audioTracks[0];
   }
-
   return stream;
+};
+
+// Screen / tab share audio is never the microphone.
+if (typeof navigator.mediaDevices.getDisplayMedia === 'function') {
+  const _origGetDisplayMedia = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
+  navigator.mediaDevices.getDisplayMedia = async function (options?: DisplayMediaStreamOptions): Promise<MediaStream> {
+    const stream = await _origGetDisplayMedia(options);
+    for (const track of stream.getTracks()) displayTracks.add(track);
+    return stream;
+  };
+}
+
+// Clones keep their origin (Meet may clone tracks before sending them).
+const _origClone = MediaStreamTrack.prototype.clone;
+MediaStreamTrack.prototype.clone = function (this: MediaStreamTrack): MediaStreamTrack {
+  const copy = _origClone.call(this);
+  if (displayTracks.has(this)) displayTracks.add(copy);
+  if (replacementTracks.has(this)) replacementTracks.add(copy);
+  return copy;
 };
 
 // ─── postMessage listener ─────────────────────────────────────────────────────

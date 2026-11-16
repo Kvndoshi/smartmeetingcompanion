@@ -69,8 +69,11 @@ function deactivateMicCapture(): void {
   }
 }
 
-function reportActivation(ok: boolean, message?: string): void {
-  chrome.runtime.sendMessage({ type: "outgoing-status", target: "background", ok, message }).catch(() => {});
+function reportActivation(ok: boolean, message?: string): Promise<void> {
+  return chrome.runtime.sendMessage({ type: "outgoing-status", target: "background", ok, message }).then(
+    () => undefined,
+    () => undefined
+  );
 }
 
 // ── Commands from the service worker ─────────────────────────────────────────
@@ -115,8 +118,10 @@ window.addEventListener("message", (event: MessageEvent) => {
     case "interpreter-activation-result": {
       const ok = msg.ok === true;
       const message = typeof msg.message === "string" ? msg.message : undefined;
-      reportActivation(ok, message);
-      if (!ok) deactivateMicCapture();
+      // On failure, disconnect only after the service worker has the reason —
+      // otherwise the port drop can stop translation silently, without the error.
+      const reported = reportActivation(ok, message);
+      if (!ok) void reported.then(() => deactivateMicCapture());
       return;
     }
     default:

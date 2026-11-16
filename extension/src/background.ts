@@ -365,6 +365,7 @@ function handleTabMessage(msg: ServerMessage, session: BackendSession): void {
       if (state.includeMic && state.modes.notes && !micSession && !state.isMicTranslating) void startNotesMic();
       tabAck = { translate: msg.translate, tts: msg.tts_provider };
       syncPassthrough();
+      syncOutgoingMeeting();
       break;
     case "transcript":
       broadcast({
@@ -589,6 +590,7 @@ async function startCapture(req: StartCaptureRequest, senderTabId?: number): Pro
     status: tabSession?.ready ? "capturing" : "connecting", // the session ack may already have arrived
   });
   syncPassthrough();
+  syncOutgoingMeeting();
 }
 
 async function stopCapture(endMeeting = true, error?: string): Promise<void> {
@@ -603,8 +605,9 @@ async function stopCapture(endMeeting = true, error?: string): Promise<void> {
   micSession = null;
   tabSession = null;
   if (mic) await mic.stop(false); // mic finals land before the meeting is summarised
-  if (tab) await tab.stop(endMeeting);
+  // Same for "Translate my voice": its socket transcribes you into this meeting.
   if (state.isMicTranslating && outgoing?.tabId === state.tabId) await stopMicTranslation();
+  if (tab) await tab.stop(endMeeting);
   await removeOffscreenDocument();
   setState({
     isCapturing: false,
@@ -682,6 +685,28 @@ async function startMicTranslation(sourceLang: string, targetLang: string, sende
     await stopMicTranslation("error");
     throw new Error("Couldn't reach the Meet page — reload the Google Meet tab and try again");
   }
+}
+
+/**
+ * "Translate my voice" turned on before notes started: its socket was opened
+ * without a meeting, and the notes mic stays off while it runs — so your words
+ * would be missing from the notes. Reconnect it so the config carries the
+ * meeting. Runs on the ack and once capture is live, whichever comes last.
+ */
+let refreshingOutgoing = false;
+function syncOutgoingMeeting(): void {
+  const session = outgoingSession;
+  if (!session || refreshingOutgoing || !state.isCapturing || !state.modes.notes || !state.meetingId) return;
+  if (outgoing?.tabId !== state.tabId || session.meetingId === state.meetingId) return;
+  refreshingOutgoing = true;
+  void (async () => {
+    try {
+      await session.stop(false);
+      if (outgoingSession === session) session.connect();
+    } finally {
+      refreshingOutgoing = false;
+    }
+  })();
 }
 
 async function stopMicTranslation(status: "idle" | "error" = "idle"): Promise<void> {
