@@ -72,8 +72,14 @@ class AzureConversationClient:
         target_language: str | None = None,
         on_transcript: Callable[[str, bool], Awaitable[None]] | None = None,
         on_translation: Callable[[str, bool], Awaitable[None]] | None = None,
+        on_error: Callable[..., Awaitable[None]] | None = None,
     ):
         self.api_key = api_key
+        self.on_error = on_error
+        # Translator needs a Translator (or multi-service) key; a Speech-only key 401s.
+        self.translator_key = os.getenv("AZURE_TRANSLATOR_KEY", "").strip()
+        self.translator_region = os.getenv("AZURE_TRANSLATOR_REGION", "").strip() or region
+        self._final_generation = 0
         self.region = region
         self.source_locale = _SOURCE_LOCALE_MAP.get(language, language)
         self.target_lang_code = target_language or "es"
@@ -146,7 +152,10 @@ class AzureConversationClient:
         self._transcriber.canceled.connect(self._on_canceled)
         self._transcriber.session_stopped.connect(self._on_session_stopped)
 
-        self._transcriber.start_transcribing_async().get()
+        # .get() blocks; run it off the event loop.
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self._transcriber.start_transcribing_async().get()
+        )
         self.is_connected = True
         logger.info(
             "Azure conversation transcriber connected (source=%s segmentation=%sms)",
@@ -174,7 +183,10 @@ class AzureConversationClient:
             pass
         try:
             if self._transcriber is not None:
-                self._transcriber.stop_transcribing_async().get()
+                transcriber = self._transcriber
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: transcriber.stop_transcribing_async().get()
+                )
         except (RuntimeError, OSError) as e:
             logger.warning("Azure stop_transcribing error: %s", e)
         if self._http_client is not None:
@@ -197,7 +209,7 @@ class AzureConversationClient:
         self._update_gender(evt)
         if self._loop and self.on_transcript:
             asyncio.run_coroutine_threadsafe(
-                self.on_transcript(text, False),
+                self.on_transcript(text, False, speaker=speaker_id or self.last_speaker_id),
                 self._loop,
             )
         # Throttled partial translation: translate every ~400ms or when text
@@ -212,7 +224,7 @@ class AzureConversationClient:
                 self._last_partial_emit_at = now
                 self._last_partial_text = text
                 asyncio.run_coroutine_threadsafe(
-                    self._translate_and_emit_partial(text),
+                    self._translate_and_emit_partial(text, self._final_generation),
                     self._loop,
                 )
 
@@ -232,10 +244,12 @@ class AzureConversationClient:
         if self._loop is None:
             return
 
+        self._final_generation += 1
+        self._last_partial_text = ""
         # Emit final transcript
         if self.on_transcript:
             asyncio.run_coroutine_threadsafe(
-                self.on_transcript(text, True),
+                self.on_transcript(text, True, speaker=speaker_id or self.last_speaker_id),
                 self._loop,
             )
 
@@ -254,6 +268,13 @@ class AzureConversationClient:
             evt.error_details if hasattr(evt, "error_details") else "",
         )
         self.is_connected = False
+        if (
+            getattr(evt, "reason", None) == speechsdk.CancellationReason.Error
+            and self.on_error
+            and self._loop
+        ):
+            details = getattr(evt, "error_details", "") or "recognition canceled"
+            asyncio.run_coroutine_threadsafe(self.on_error(details), self._loop)
 
     def _on_session_stopped(self, _evt) -> None:
         logger.info("Azure conversation transcriber session stopped")
@@ -347,12 +368,15 @@ class AzureConversationClient:
         except Exception as e:
             logger.error("Translation API error: %s", e)
 
-    async def _translate_and_emit_partial(self, text: str) -> None:
+    async def _translate_and_emit_partial(self, text: str, generation: int = 0) -> None:
         """Translate a partial transcript and emit as a non-final translation."""
         if not text.strip() or not self._http_client:
             return
         try:
             translated = await self._call_translator(text)
+            # Drop partials that resolve after the utterance's final was emitted.
+            if generation != self._final_generation:
+                return
             if translated and self.on_translation and self._loop:
                 await self.on_translation(translated, False)
         except Exception:
@@ -360,18 +384,27 @@ class AzureConversationClient:
 
     async def _call_translator(self, text: str) -> str | None:
         """Azure Translator Text API v3.0 — translate a single string."""
-        endpoint = (
-            f"https://{self.region}.api.cognitive.microsoft.com"
-            f"/translator/text/v3.0/translate"
+        query = (
             f"?api-version=3.0"
             f"&from={self.source_locale.split('-')[0]}"
             f"&to={self.translator_target}"
         )
         headers = {
-            "Ocp-Apim-Subscription-Key": self.api_key,
             "Content-Type": "application/json",
             "X-ClientTraceId": str(uuid.uuid4()),
         }
+        if self.translator_key:
+            # Dedicated Translator resource → global endpoint + region header.
+            endpoint = "https://api.cognitive.microsofttranslator.com/translate" + query
+            headers["Ocp-Apim-Subscription-Key"] = self.translator_key
+            if self.translator_region:
+                headers["Ocp-Apim-Subscription-Region"] = self.translator_region
+        else:
+            # Multi-service Azure AI resource → regional endpoint with the speech key.
+            endpoint = (
+                f"https://{self.region}.api.cognitive.microsoft.com/translator/text/v3.0/translate" + query
+            )
+            headers["Ocp-Apim-Subscription-Key"] = self.api_key
         body = [{"text": text}]
 
         resp = await self._http_client.post(endpoint, json=body, headers=headers)

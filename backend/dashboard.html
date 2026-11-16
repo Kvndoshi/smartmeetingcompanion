@@ -3,444 +3,283 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Interpreter — Dashboard</title>
+<title>Distill Dashboard</title>
 <style>
   :root {
-    --bg: #0a0a0f;
-    --surface: #141420;
-    --surface-2: #1c1c2e;
-    --border: #2a2a40;
-    --text: #e4e4ef;
-    --text-dim: #8888a0;
-    --accent: #6c5ce7;
-    --accent-hover: #7c6cf7;
-    --green: #00b894;
-    --red: #e17055;
-    --orange: #fdcb6e;
+    --bg: #0a0a0f; --surface: #141420; --surface-2: #1c1c2e; --border: #2a2a40;
+    --text: #e4e4ef; --text-dim: #8888a0; --accent: #6c5ce7; --accent-hover: #7c6cf7;
+    --green: #00b894; --red: #e17055; --orange: #fdcb6e;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-  }
-  .header {
-    padding: 24px 32px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
   .header h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.5px; }
-  .header .status {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-  .status-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--green);
-    animation: pulse 2s infinite;
-  }
+  .header .status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
   .status-dot.offline { background: var(--red); animation: none; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-  .container {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 32px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
-  }
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  .card-header {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .container { max-width: 760px; margin: 0 auto; padding: 28px 16px; display: flex; flex-direction: column; gap: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .card-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   .card-header h2 { font-size: 15px; font-weight: 600; }
-  .card-header .badge {
-    margin-left: auto;
-    font-size: 11px;
-    padding: 3px 10px;
-    border-radius: 20px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
+  .badge { margin-left: auto; font-size: 11px; padding: 3px 10px; border-radius: 20px; background: var(--surface-2); color: var(--text-dim); white-space: nowrap; }
   .badge.ok { background: #00b89422; color: var(--green); }
   .badge.warn { background: #fdcb6e22; color: var(--orange); }
-  .card-body { padding: 20px; }
-  .field { margin-bottom: 16px; }
-  .field:last-child { margin-bottom: 0; }
-  .field label {
-    display: block;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-dim);
-    margin-bottom: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .field input, .field select {
-    width: 100%;
-    padding: 10px 14px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 14px;
-    font-family: 'Consolas', 'Courier New', monospace;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .field input:focus, .field select:focus {
-    border-color: var(--accent);
-  }
+  .card-body { padding: 18px; }
+  .group-title { font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: .6px; margin: 18px 0 10px; font-weight: 600; }
+  .group-title:first-child { margin-top: 0; }
+  .field { margin-bottom: 14px; }
+  .field label { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .field input, .field select { width: 100%; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; font-family: 'Consolas', 'Courier New', monospace; outline: none; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
   .field input::placeholder { color: #555570; }
-  .field .hint {
-    margin-top: 4px;
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-  .field .hint a { color: var(--accent); text-decoration: none; }
-  .field .hint a:hover { text-decoration: underline; }
-  .row { display: flex; gap: 12px; }
-  .row .field { flex: 1; }
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 20px;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s, transform 0.1s;
-  }
+  .hint { margin-top: 4px; font-size: 11px; color: var(--text-dim); }
+  .hint a { color: var(--accent); text-decoration: none; }
+  .pill { font-size: 10px; padding: 1px 8px; border-radius: 10px; background: var(--surface-2); color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+  .pill.ok { background: #00b89422; color: var(--green); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row .field { flex: 1 1 200px; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 18px; background: var(--accent); color: #fff; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
   .btn:hover { background: var(--accent-hover); }
-  .btn:active { transform: scale(0.98); }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-row { display: flex; gap: 10px; margin-top: 16px; }
-  .btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-  .btn.secondary:hover { background: var(--border); }
-  .btn.danger { background: var(--red); }
-  .btn.danger:hover { background: #c0392b; }
-  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .translation-status {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 20px;
-    background: var(--surface-2);
-    border-radius: 8px;
-    margin-top: 16px;
-  }
-  .translation-status .indicator {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
-  .translation-status .indicator.active {
-    background: var(--green);
-    animation: pulse 1.5s infinite;
-  }
-  .translation-status .label {
-    font-size: 14px;
-    font-weight: 500;
-  }
-  .toast {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    padding: 12px 20px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    font-size: 13px;
-    transform: translateY(80px);
-    opacity: 0;
-    transition: all 0.3s;
-    z-index: 100;
-  }
+  .btn-row { display: flex; gap: 10px; margin-top: 8px; }
+  .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; transform: translateY(80px); opacity: 0; transition: all 0.3s; z-index: 100; max-width: calc(100vw - 48px); }
   .toast.show { transform: translateY(0); opacity: 1; }
   .toast.success { border-color: var(--green); }
   .toast.error { border-color: var(--red); }
-  .icon { font-size: 18px; }
-  .sep { height: 1px; background: var(--border); margin: 16px 0; }
-  .info-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-  .info-item {
-    background: var(--surface-2);
-    padding: 12px 14px;
-    border-radius: 8px;
-  }
+  .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .info-item { background: var(--surface-2); padding: 11px 13px; border-radius: 8px; }
   .info-item .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
   .info-item .value { font-size: 14px; margin-top: 4px; font-weight: 500; }
+  code { background: var(--surface-2); padding: 2px 6px; border-radius: 4px; }
+  ol { padding-left: 20px; color: var(--text-dim); font-size: 14px; line-height: 1.8; }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <span class="icon">&#127760;</span>
-  <h1>Interpreter Dashboard</h1>
-  <div class="status">
-    <div class="status-dot" id="statusDot"></div>
-    <span id="statusText">Checking...</span>
-  </div>
+  <h1>Distill Dashboard</h1>
+  <div class="status"><div class="status-dot" id="statusDot"></div><span id="statusText">Checking…</span></div>
 </div>
 
 <div class="container">
 
-  <!-- Server Status -->
   <div class="card">
-    <div class="card-header">
-      <span class="icon">&#9881;</span>
-      <h2>Server Status</h2>
-      <span class="badge" id="serverBadge">...</span>
-    </div>
+    <div class="card-header"><h2>Active providers</h2><span class="badge" id="serverBadge">…</span></div>
     <div class="card-body">
-      <div class="info-grid" id="serverInfo">
-        <div class="info-item">
-          <div class="label">Backend</div>
-          <div class="value" id="backendUrl">http://localhost:8000</div>
-        </div>
-        <div class="info-item">
-          <div class="label">Translation Provider</div>
-          <div class="value" id="translationProvider">—</div>
-        </div>
-        <div class="info-item">
-          <div class="label">TTS Provider</div>
-          <div class="value" id="ttsProvider">—</div>
-        </div>
-        <div class="info-item">
-          <div class="label">API Keys</div>
-          <div class="value" id="keysStatus">—</div>
-        </div>
+      <div class="info-grid">
+        <div class="info-item"><div class="label">Transcription</div><div class="value" id="defStt">—</div></div>
+        <div class="info-item"><div class="label">Voice (TTS)</div><div class="value" id="defTts">—</div></div>
+        <div class="info-item"><div class="label">Summaries &amp; chat</div><div class="value" id="defLlm">—</div></div>
+        <div class="info-item"><div class="label">Text translation</div><div class="value" id="defTranslator">—</div></div>
+        <div class="info-item"><div class="label">Memory</div><div class="value" id="defMemory">—</div></div>
       </div>
+      <div class="hint" style="margin-top:10px">Providers are chosen automatically from the keys you set. Pin one below or per session in the extension popup.</div>
     </div>
   </div>
 
-  <!-- API Keys -->
   <div class="card">
-    <div class="card-header">
-      <span class="icon">&#128273;</span>
-      <h2>API Keys</h2>
-      <span class="badge" id="keysBadge">not set</span>
-    </div>
+    <div class="card-header"><h2>API keys</h2><span class="badge" id="keysBadge">…</span></div>
     <div class="card-body">
-      <div class="field">
-        <label>Speechmatics API Key</label>
-        <input type="password" id="speechmaticsKey" placeholder="paste your key here...">
-        <div class="hint">Get from <a href="https://portal.speechmatics.com" target="_blank">portal.speechmatics.com</a> &mdash; use code <strong>VOICEAGENT200</strong> for $200 credit</div>
-      </div>
-      <div class="field">
-        <label>MiniMax API Key</label>
-        <input type="password" id="minimaxKey" placeholder="paste your key here...">
-        <div class="hint">Get from <a href="https://www.minimax.io" target="_blank">minimax.io</a> &mdash; $20 free credit</div>
-      </div>
-      <div class="btn-row">
-        <button class="btn" onclick="saveKeys()">Save Keys</button>
-      </div>
+      <div id="keyFields"></div>
+      <div class="hint" style="margin-bottom:12px">Keys are stored only in <code>backend/.env</code> on this computer. Saved keys show masked; leave a field empty to keep it.</div>
+      <div class="btn-row"><button class="btn" id="saveKeysBtn">Save keys</button></div>
     </div>
   </div>
 
-  <!-- Translation Settings -->
   <div class="card">
-    <div class="card-header">
-      <span class="icon">&#9878;</span>
-      <h2>Translation Settings</h2>
-    </div>
+    <div class="card-header"><h2>Defaults &amp; tuning</h2></div>
     <div class="card-body">
       <div class="row">
-        <div class="field">
-          <label>STT Engine</label>
-          <select id="sttEngine">
-            <option value="azure_diarize">Azure Diarize (multi-speaker, recommended)</option>
-            <option value="azure">Azure Speech (single speaker)</option>
-            <option value="speechmatics">Speechmatics RT</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>TTS Engine</label>
-          <select id="ttsEngine">
-            <option value="azure">Azure Neural TTS (recommended)</option>
-            <option value="speechmatics">Speechmatics TTS</option>
-            <option value="minimax">MiniMax Speech</option>
-          </select>
-        </div>
+        <div class="field"><label>Transcription (STT)</label><select id="STT_PROVIDER"></select></div>
+        <div class="field"><label>Voice (TTS)</label><select id="TTS_PROVIDER"></select></div>
       </div>
       <div class="row">
-        <div class="field">
-          <label>Chunk Threshold (chars)</label>
-          <input type="number" id="chunkThreshold" value="24" min="8" max="200">
-          <div class="hint">Lower = faster response, higher = more stable text</div>
-        </div>
-        <div class="field">
-          <label>Segmentation Silence (ms)</label>
-          <input type="text" id="maxDelay" value="500" placeholder="500">
-          <div class="hint">Azure endpointing — lower = snappier finals</div>
-        </div>
+        <div class="field"><label>LLM</label><select id="LLM_PROVIDER"></select></div>
+        <div class="field"><label>Text translation</label><select id="TRANSLATION_PROVIDER"></select>
+          <div class="hint">Used when the STT provider has no built-in translation (e.g. Deepgram).</div></div>
       </div>
-      <div class="btn-row">
-        <button class="btn" onclick="saveSettings()">Save Settings</button>
+      <div class="row">
+        <div class="field"><label>Auto-summary when a meeting ends</label>
+          <select id="AUTO_SUMMARY"><option value="1">On</option><option value="0">Off</option></select></div>
+        <div class="field"><label>Summary language</label><input id="SUMMARY_LANGUAGE" placeholder="en"></div>
       </div>
-      <div class="translation-status" id="translationStatus">
-        <div class="indicator" id="translationIndicator"></div>
-        <span class="label" id="translationLabel">Idle — start a session from the extension</span>
+      <div class="row">
+        <div class="field"><label>Translation chunk (chars)</label><input type="number" id="TRANSLATION_TRIGGER_CHAR_THRESHOLD" min="8" max="400" placeholder="60">
+          <div class="hint">Text-translation path: lower = faster, higher = more context.</div></div>
+        <div class="field"><label>Azure segmentation silence (ms)</label><input type="number" id="AZURE_SEGMENTATION_SILENCE_MS" min="100" max="5000" placeholder="500"></div>
+        <div class="field"><label>Speechmatics max delay (s)</label><input type="number" step="0.1" id="SPEECHMATICS_MAX_DELAY" min="0.7" max="4" placeholder="1.0"></div>
       </div>
+      <div class="btn-row"><button class="btn" id="saveSettingsBtn">Save settings</button></div>
     </div>
   </div>
 
-  <!-- Extension Instructions -->
   <div class="card">
-    <div class="card-header">
-      <span class="icon">&#128268;</span>
-      <h2>Chrome Extension</h2>
-    </div>
-    <div class="card-body" style="color: var(--text-dim); font-size: 14px; line-height: 1.7;">
-      <ol style="padding-left: 20px;">
-        <li>Open <code style="background:var(--surface-2);padding:2px 6px;border-radius:4px;">chrome://extensions</code> in Chrome</li>
-        <li>Enable <strong>Developer Mode</strong> (top right toggle)</li>
-        <li>Click <strong>Load unpacked</strong></li>
-        <li>Select the <code style="background:var(--surface-2);padding:2px 6px;border-radius:4px;">interpreter/extension/dist</code> folder</li>
-        <li>Open any tab with audio (YouTube, Google Meet, etc.)</li>
-        <li>Click the Interpreter extension icon and start translating</li>
+    <div class="card-header"><h2>Chrome / Edge extension</h2></div>
+    <div class="card-body">
+      <ol>
+        <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>) and enable <strong>Developer mode</strong>.</li>
+        <li>Click <strong>Load unpacked</strong> and select the <code>extension/dist</code> folder.</li>
+        <li>Join a meeting in a browser tab (Google Meet, Teams, Zoom web, …) or open any tab with audio.</li>
+        <li>Click the Distill icon: choose <strong>Take notes</strong> and/or <strong>Translate audio</strong>, then Start.</li>
+        <li>Open the notes panel for the live transcript, summary and chat.</li>
       </ol>
     </div>
   </div>
-
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
-const API = '';
+const KEY_GROUPS = [
+  ['Speech-to-text & voice', [
+    ['SONIOX_API_KEY', 'Soniox', 'https://console.soniox.com', 'STT + diarization + translation + TTS (recommended)'],
+    ['DEEPGRAM_API_KEY', 'Deepgram', 'https://console.deepgram.com', 'STT with diarization, Aura TTS'],
+    ['SPEECHMATICS_API_KEY', 'Speechmatics', 'https://portal.speechmatics.com', 'STT + translation'],
+    ['AZURE_SPEECH_KEY', 'Azure Speech', 'https://portal.azure.com', 'STT, translation, neural TTS'],
+    ['AZURE_SPEECH_REGION', 'Azure region', null, 'e.g. eastus', true],
+    ['AZURE_TRANSLATOR_KEY', 'Azure Translator (optional)', null, 'Text translation for Azure diarized STT'],
+    ['MINIMAX_API_KEY', 'MiniMax', 'https://www.minimax.io', 'TTS + text translation'],
+  ]],
+  ['Summaries & chat (LLM)', [
+    ['GEMINI_API_KEY', 'Gemini', 'https://aistudio.google.com/apikey', 'Summaries, chat, translation'],
+    ['GROQ_API_KEY', 'Groq', 'https://console.groq.com/keys', 'Fast summaries, chat, translation'],
+  ]],
+  ['Memory', [
+    ['SUPERMEMORY_API_KEY', 'Supermemory', 'https://console.supermemory.ai', 'Chat across all your meetings'],
+  ]],
+];
+const KEY_TO_PROVIDER = {
+  SONIOX_API_KEY: ['stt', 'soniox'], DEEPGRAM_API_KEY: ['stt', 'deepgram'], SPEECHMATICS_API_KEY: ['stt', 'speechmatics'],
+  AZURE_SPEECH_KEY: ['stt', 'azure'], MINIMAX_API_KEY: ['tts', 'minimax'], GEMINI_API_KEY: ['llm', 'gemini'], GROQ_API_KEY: ['llm', 'groq'],
+};
+const SELECTS = { STT_PROVIDER: 'stt', TTS_PROVIDER: 'tts', LLM_PROVIDER: 'llm', TRANSLATION_PROVIDER: 'translator' };
+const TUNING = ['AUTO_SUMMARY', 'SUMMARY_LANGUAGE', 'TRANSLATION_TRIGGER_CHAR_THRESHOLD', 'AZURE_SEGMENTATION_SILENCE_MS', 'SPEECHMATICS_MAX_DELAY'];
+const $ = (id) => document.getElementById(id);
+let providers = null;
 
 function toast(msg, type = 'success') {
-  const el = document.getElementById('toast');
+  const el = $('toast');
   el.textContent = msg;
   el.className = 'toast show ' + type;
-  setTimeout(() => el.className = 'toast', 3000);
+  setTimeout(() => (el.className = 'toast'), 3500);
+}
+
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'text') node.textContent = v; else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) if (c) node.append(c);
+  return node;
+}
+
+function buildKeyFields() {
+  const root = $('keyFields');
+  for (const [title, keys] of KEY_GROUPS) {
+    root.append(el('div', { class: 'group-title', text: title }));
+    for (const [key, label, url, hint, plain] of keys) {
+      const hintEl = el('div', { class: 'hint' }, [hint || '']);
+      if (url) { hintEl.append(' — '); hintEl.append(el('a', { href: url, target: '_blank', rel: 'noopener', text: new URL(url).host })); }
+      root.append(el('div', { class: 'field' }, [
+        el('label', { for: key }, [label, el('span', { class: 'pill', id: 'pill-' + key, text: '' })]),
+        el('input', { id: key, type: plain ? 'text' : 'password', placeholder: plain ? '' : 'paste key…', autocomplete: 'off' }),
+        hintEl,
+      ]));
+    }
+  }
 }
 
 async function checkHealth() {
   try {
-    const r = await fetch(API + '/health');
-    const d = await r.json();
-    document.getElementById('statusDot').className = 'status-dot';
-    document.getElementById('statusText').textContent = 'Server running';
-    document.getElementById('serverBadge').className = 'badge ok';
-    document.getElementById('serverBadge').textContent = 'online';
+    await (await fetch('/health')).json();
+    $('statusDot').className = 'status-dot'; $('statusText').textContent = 'Server running';
+    $('serverBadge').className = 'badge ok'; $('serverBadge').textContent = 'online';
     return true;
   } catch {
-    document.getElementById('statusDot').className = 'status-dot offline';
-    document.getElementById('statusText').textContent = 'Server offline';
-    document.getElementById('serverBadge').className = 'badge warn';
-    document.getElementById('serverBadge').textContent = 'offline';
+    $('statusDot').className = 'status-dot offline'; $('statusText').textContent = 'Server offline';
+    $('serverBadge').className = 'badge warn'; $('serverBadge').textContent = 'offline';
     return false;
   }
 }
 
-async function loadSettings() {
+function label(kind, id) {
+  if (!id) return null;
+  const p = providers?.[kind]?.providers.find((x) => x.id === id);
+  return p ? p.label : id;
+}
+
+function fillSelect(id, kind, current) {
+  const select = $(id);
+  select.replaceChildren(el('option', { value: '', text: 'Automatic (from keys)' }));
+  for (const p of providers[kind].providers) {
+    if (p.id === 'fake') continue;
+    select.append(el('option', { value: p.id, text: p.label + (p.configured ? '' : ' — no key') }));
+  }
+  select.value = current || '';
+}
+
+async function loadAll() {
   try {
-    const r = await fetch(API + '/api/settings');
-    const d = await r.json();
+    const [settings, status] = await Promise.all([
+      fetch('/api/settings').then((r) => r.json()),
+      fetch('/api/providers').then((r) => r.json()),
+    ]);
+    providers = status;
+    $('defStt').textContent = label('stt', status.stt.default) || 'not configured';
+    $('defTts').textContent = label('tts', status.tts.default) || 'not configured';
+    $('defLlm').textContent = label('llm', status.llm.default) || 'not configured';
+    $('defTranslator').textContent = label('translator', status.translator.default) || 'not configured';
+    $('defMemory').textContent = status.memory.supermemory ? 'Supermemory' : 'Local only';
 
-    document.getElementById('translationProvider').textContent =
-      (d.STT_PROVIDER || 'azure_diarize') === 'azure_diarize' ? 'Azure Diarize' :
-      (d.STT_PROVIDER || 'azure_diarize') === 'azure' ? 'Azure Speech' : 'Speechmatics';
-    document.getElementById('ttsProvider').textContent =
-      (d.TTS_PROVIDER || 'azure').charAt(0).toUpperCase() + (d.TTS_PROVIDER || 'azure').slice(1);
-
-    if (d._keys_configured) {
-      document.getElementById('keysStatus').textContent = 'Configured';
-      document.getElementById('keysStatus').style.color = 'var(--green)';
-      document.getElementById('keysBadge').className = 'badge ok';
-      document.getElementById('keysBadge').textContent = 'configured';
-    } else {
-      document.getElementById('keysStatus').textContent = 'Not set';
-      document.getElementById('keysStatus').style.color = 'var(--orange)';
-      document.getElementById('keysBadge').className = 'badge warn';
-      document.getElementById('keysBadge').textContent = 'not set';
+    let configured = 0;
+    for (const [, keys] of KEY_GROUPS) for (const [key, , , , plain] of keys) {
+      const input = $(key);
+      const value = settings[key] || '';
+      if (plain) input.value = value; else input.placeholder = value || 'paste key…';
+      const pill = $('pill-' + key);
+      if (value) { configured++; pill.textContent = 'saved'; pill.className = 'pill ok'; }
+      else { pill.textContent = 'not set'; pill.className = 'pill'; }
     }
-
-    document.getElementById('sttEngine').value = d.STT_PROVIDER || 'azure';
-    document.getElementById('ttsEngine').value = d.TTS_PROVIDER || 'azure';
-    document.getElementById('chunkThreshold').value = d.TRANSLATION_TRIGGER_CHAR_THRESHOLD || '24';
-    document.getElementById('maxDelay').value = d.AZURE_SEGMENTATION_SILENCE_MS || d.SPEECHMATICS_MAX_DELAY || '500';
-  } catch {}
+    $('keysBadge').className = 'badge ' + (status.stt.default ? 'ok' : 'warn');
+    $('keysBadge').textContent = status.stt.default ? configured + ' configured' : 'add a speech key';
+    for (const [id, kind] of Object.entries(SELECTS)) fillSelect(id, kind, settings[id]);
+    for (const id of TUNING) if (settings[id] !== undefined && settings[id] !== '') $(id).value = settings[id];
+  } catch (e) {
+    toast('Could not load settings: ' + e.message, 'error');
+  }
 }
 
-async function saveKeys() {
+async function post(settings, okMsg) {
+  const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings }) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  toast(okMsg);
+  await loadAll();
+}
+
+$('saveKeysBtn').onclick = async () => {
   const settings = {};
-  const sk = document.getElementById('speechmaticsKey').value.trim();
-  const mk = document.getElementById('minimaxKey').value.trim();
-  if (sk) settings.SPEECHMATICS_API_KEY = sk;
-  if (mk) settings.MINIMAX_API_KEY = mk;
-  if (Object.keys(settings).length === 0) {
-    toast('Enter at least one key', 'error');
-    return;
+  for (const [, keys] of KEY_GROUPS) for (const [key, , , , plain] of keys) {
+    const v = $(key).value.trim();
+    if (v && (plain || !v.includes('****'))) settings[key] = v;
   }
+  if (!Object.keys(settings).length) return toast('Enter at least one key', 'error');
   try {
-    const r = await fetch(API + '/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings })
-    });
-    const d = await r.json();
-    toast('Keys saved! Restart translation session to apply.');
-    document.getElementById('speechmaticsKey').value = '';
-    document.getElementById('minimaxKey').value = '';
-    loadSettings();
-  } catch (e) {
-    toast('Failed to save: ' + e.message, 'error');
-  }
-}
+    await post(settings, 'Keys saved. New sessions use them immediately.');
+    for (const [, keys] of KEY_GROUPS) for (const [key, , , , plain] of keys) if (!plain) $(key).value = '';
+  } catch (e) { toast('Failed to save: ' + e.message, 'error'); }
+};
 
-async function saveSettings() {
-  const settings = {
-    STT_PROVIDER: document.getElementById('sttEngine').value,
-    TTS_PROVIDER: document.getElementById('ttsEngine').value,
-    TRANSLATION_TRIGGER_CHAR_THRESHOLD: document.getElementById('chunkThreshold').value,
-    AZURE_SEGMENTATION_SILENCE_MS: document.getElementById('maxDelay').value,
-  };
-  try {
-    await fetch(API + '/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings })
-    });
-    toast('Settings saved!');
-    loadSettings();
-  } catch (e) {
-    toast('Failed to save: ' + e.message, 'error');
-  }
-}
+$('saveSettingsBtn').onclick = async () => {
+  const settings = {};
+  for (const id of [...Object.keys(SELECTS), ...TUNING]) settings[id] = $(id).value.trim();
+  try { await post(settings, 'Settings saved.'); } catch (e) { toast('Failed to save: ' + e.message, 'error'); }
+};
 
-checkHealth().then(ok => { if (ok) loadSettings(); });
+buildKeyFields();
+checkHealth().then((ok) => { if (ok) loadAll(); });
 setInterval(checkHealth, 10000);
 </script>
-
 </body>
 </html>

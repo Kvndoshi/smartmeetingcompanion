@@ -24,7 +24,10 @@ SM_RT_URL = os.getenv(
 ).strip()
 SM_PING_INTERVAL = 20
 SM_PING_TIMEOUT = 30
-SM_MAX_DELAY = float(os.getenv("SPEECHMATICS_MAX_DELAY", "1.0"))
+try:
+    SM_MAX_DELAY = float(os.getenv("SPEECHMATICS_MAX_DELAY", "1.0").strip() or "1.0")
+except ValueError:
+    SM_MAX_DELAY = 1.0
 SM_TRANSLATION_ENABLE_PARTIALS = os.getenv(
     "SPEECHMATICS_TRANSLATION_ENABLE_PARTIALS", "1"
 ).strip().lower() not in {"0", "false", "no"}
@@ -58,8 +61,11 @@ class SpeechmaticsClient:
         target_language: str | None = None,
         on_transcript: Callable[[str, bool], Awaitable[None]] | None = None,
         on_translation: Callable[[str, bool], Awaitable[None]] | None = None,
+        on_error: Callable[..., Awaitable[None]] | None = None,
     ):
         self.api_key = api_key
+        self.on_error = on_error
+        self._closing = False
         self.language = SM_LANGUAGE_MAP.get(language, language)
         self.target_language = (
             SM_LANGUAGE_MAP.get(target_language, target_language)
@@ -74,6 +80,9 @@ class SpeechmaticsClient:
 
     async def connect(self) -> None:
         """Connect to Speechmatics RT WebSocket."""
+        if not self.api_key:
+            raise ValueError("Speechmatics requires SPEECHMATICS_API_KEY")
+        self._closing = False
         url = SM_RT_URL
         if not (url.startswith("wss://") or url.startswith("ws://")):
             raise ValueError(
@@ -171,11 +180,17 @@ class SpeechmaticsClient:
 
                 elif msg_type == "Error":
                     logger.error(f"Speechmatics error: {msg}")
+                    if self.on_error:
+                        await self.on_error(str(msg.get("reason") or msg.get("type") or msg))
 
-        except websockets.exceptions.ConnectionClosed:
+        except websockets.exceptions.ConnectionClosed as e:
             logger.info("Speechmatics connection closed")
+            if not self._closing and self.on_error:
+                await self.on_error(f"connection closed ({e.code})")
         except Exception as e:
             logger.error(f"Speechmatics receive error: {e}")
+            if self.on_error:
+                await self.on_error(str(e))
         finally:
             self.is_connected = False
 
@@ -215,6 +230,7 @@ class SpeechmaticsClient:
 
     async def close(self) -> None:
         """Close the Speechmatics connection."""
+        self._closing = True
         if self.ws and self.is_connected:
             try:
                 # Send EndOfStream

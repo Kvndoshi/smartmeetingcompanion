@@ -87,8 +87,10 @@ class AzureTranslationClient:
         on_transcript: Callable[[str, bool], Awaitable[None]] | None = None,
         on_translation: Callable[[str, bool], Awaitable[None]] | None = None,
         on_audio: Callable[[bytes], Awaitable[None]] | None = None,
+        on_error: Callable[..., Awaitable[None]] | None = None,
     ):
         self.api_key = api_key
+        self.on_error = on_error
         self.region = region
         self.source_locale = _SOURCE_LOCALE_MAP.get(language, language)
         self.target_lang = _TARGET_LANG_MAP.get(target_language, target_language) if target_language else None
@@ -166,7 +168,9 @@ class AzureTranslationClient:
         if self.on_audio:
             self._recognizer.synthesizing.connect(self._on_synthesizing)
 
-        self._recognizer.start_continuous_recognition()
+        # The sync start call blocks until the session opens; keep it off the loop.
+        recognizer = self._recognizer
+        await asyncio.get_running_loop().run_in_executor(None, recognizer.start_continuous_recognition)
         self.is_connected = True
         logger.info(
             "Azure translation connected (source=%s target=%s segmentation=%sms synthesis=%s)",
@@ -196,7 +200,8 @@ class AzureTranslationClient:
             pass
         try:
             if self._recognizer is not None:
-                self._recognizer.stop_continuous_recognition()
+                recognizer = self._recognizer
+                await asyncio.get_running_loop().run_in_executor(None, recognizer.stop_continuous_recognition)
         except (RuntimeError, OSError) as e:
             logger.warning("Azure stop_continuous_recognition error: %s", e)
         self._push_stream = None
@@ -229,6 +234,14 @@ class AzureTranslationClient:
             evt.error_details,
         )
         self.is_connected = False
+        if (
+            getattr(evt, "reason", None) == speechsdk.CancellationReason.Error
+            and self.on_error
+            and self._loop
+        ):
+            asyncio.run_coroutine_threadsafe(
+                self.on_error(evt.error_details or "recognition canceled"), self._loop
+            )
 
     def _on_session_stopped(self, _evt) -> None:
         logger.info("Azure translation session stopped")
@@ -268,14 +281,15 @@ class AzureTranslationClient:
     def _emit(self, transcript: str, translation: str, is_final: bool) -> None:
         if self._loop is None:
             return
+        speaker = self.last_speaker_id
         if transcript and self.on_transcript is not None:
             asyncio.run_coroutine_threadsafe(
-                self.on_transcript(transcript, is_final),
+                self.on_transcript(transcript, is_final, speaker=speaker),
                 self._loop,
             )
         if translation and self.on_translation is not None:
             asyncio.run_coroutine_threadsafe(
-                self.on_translation(translation, is_final),
+                self.on_translation(translation, is_final, speaker=speaker),
                 self._loop,
             )
 

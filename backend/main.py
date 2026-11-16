@@ -1,78 +1,128 @@
 """
-Interpreter Backend — FastAPI WebSocket Server
-Handles: Audio → STT/Translation → TTS → Audio
+Distill backend — FastAPI server for the Smart Meeting Companion.
+
+- /ws/translate      live audio → STT → (translation → TTS) + meeting transcript
+- /api/meetings/*    stored meetings, summaries, Markdown export
+- /api/chat          chat with a meeting or across meetings (RAG, SSE stream)
+- /api/providers     which STT / TTS / LLM / memory providers are configured
+- /api/settings      read/write backend/.env from the local dashboard
+- /api/memories/*    Supermemory search (Memories tab)
 """
 
-import asyncio
-import json
 import logging
 import os
-import struct
-import time
+import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-
-from pathlib import Path
-
-from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
-from services.speechmatics_client import SpeechmaticsClient
-from services.minimax_client import MinimaxClient, get_language_name
-from services.speechmatics_tts_client import SpeechmaticsTTSClient
-from services.azure_translation_client import AzureTranslationClient
-from services.azure_conversation_client import AzureConversationClient
-from services.azure_tts_client import AzureTtsClient
-from services.profile_store import init_db, get_profile, upsert_profile, update_voice_profile, set_voice_status, list_profiles
-from supermemory.client import SupermemorySession
+from routers.meetings import router as meetings_router
+from services import background, meeting_store
+from services.profile_store import (
+    get_profile,
+    init_db,
+    list_profiles,
+    set_voice_status,
+    update_voice_profile,
+    upsert_profile,
+)
+from services.providers import registry
+from services.session import LiveSession
 from supermemory.query import query_memories
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(ENV_PATH)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("interpreter")
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    """Application lifespan context manager."""
-    logger.info("Interpreter backend starting...")
-    init_db()
-    logger.info("SQLite profile store initialized")
-    yield
-    logger.info("Interpreter backend shutting down.")
-
-
-app = FastAPI(title="Interpreter Backend", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Browser pages may only talk to the backend from the extension or localhost.
+# Non-browser clients (tests, scripts) send no Origin header and are allowed.
+ALLOWED_ORIGIN_REGEX = os.getenv(
+    "ALLOWED_ORIGIN_REGEX",
+    r"^(chrome-extension|moz-extension|edge-extension)://[a-z0-9]+$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
 )
 
 
-ENV_PATH = Path(__file__).resolve().parent / ".env"
+def origin_allowed(origin: str | None) -> bool:
+    return not origin or bool(re.match(ALLOWED_ORIGIN_REGEX, origin))
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("Distill backend starting...")
+    init_db()
+    meeting_store.init_db()
+    stale = meeting_store.finalize_stale()
+    if stale:
+        logger.info("Finalized %d stale live meetings", len(stale))
+    from supermemory import sync
+
+    background.spawn(sync.sync_pending(), name="memory-sync-pending")
+    yield
+    await background.drain(timeout=10.0)
+    logger.info("Distill backend shutting down.")
+
+
+app = FastAPI(title="Distill Backend", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(meetings_router)
+
+
+# ── Settings (.env) ───────────────────────────────────────────────────
 
 MANAGED_ENV_KEYS = [
+    # API keys
+    "SONIOX_API_KEY",
+    "DEEPGRAM_API_KEY",
     "SPEECHMATICS_API_KEY",
-    "MINIMAX_API_KEY",
-    "USE_SPEECHMATICS_TRANSLATION",
-    "TTS_PROVIDER",
-    "STT_PROVIDER",
-    "TRANSLATION_TRIGGER_CHAR_THRESHOLD",
-    "SPEECHMATICS_MAX_DELAY",
-    "SPEECHMATICS_RT_WS_URL",
     "AZURE_SPEECH_KEY",
     "AZURE_SPEECH_REGION",
+    "AZURE_TRANSLATOR_KEY",
+    "AZURE_TRANSLATOR_REGION",
+    "MINIMAX_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "SUPERMEMORY_API_KEY",
+    # Provider defaults
+    "STT_PROVIDER",
+    "TTS_PROVIDER",
+    "LLM_PROVIDER",
+    "TRANSLATION_PROVIDER",
+    "LLM_TRANSLATION_PROVIDER",
+    # Models
+    "GEMINI_MODEL",
+    "GEMINI_FAST_MODEL",
+    "GROQ_MODEL",
+    "GROQ_FAST_MODEL",
+    "SONIOX_STT_MODEL",
+    "SONIOX_TTS_MODEL",
+    "SONIOX_TTS_VOICE",
+    "DEEPGRAM_STT_MODEL",
+    # Behaviour / tuning
+    "AUTO_SUMMARY",
+    "SUMMARY_LANGUAGE",
+    "TRANSLATION_TRIGGER_CHAR_THRESHOLD",
     "AZURE_SEGMENTATION_SILENCE_MS",
+    "SPEECHMATICS_MAX_DELAY",
+    "SPEECHMATICS_RT_WS_URL",
+    "USE_SPEECHMATICS_TRANSLATION",
 ]
+
+_SECRET_RE = re.compile(r"(_KEY|_TOKEN|_SECRET)$")
 
 
 def _read_env() -> dict[str, str]:
@@ -85,7 +135,7 @@ def _read_env() -> dict[str, str]:
             continue
         if "=" in line:
             k, v = line.split("=", 1)
-            vals[k.strip()] = v.strip()
+            vals[k.strip()] = v.strip().strip('"').strip("'")
     return vals
 
 
@@ -108,23 +158,36 @@ def _write_env(updates: dict[str, str]) -> None:
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    return value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
+
+
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "interpreter-backend"}
+    return {"status": "ok", "service": "distill-backend"}
+
+
+@app.get("/api/providers")
+async def api_providers():
+    return registry.status()
 
 
 @app.get("/api/settings")
 async def get_settings():
     env = _read_env()
-    result = {}
+    result: dict[str, object] = {}
     for k in MANAGED_ENV_KEYS:
         val = env.get(k, "")
-        if "KEY" in k and val:
-            result[k] = val[:4] + "****" + val[-4:] if len(val) > 8 else "****"
-        else:
-            result[k] = val
-    result["_keys_configured"] = bool(env.get("SPEECHMATICS_API_KEY"))
+        result[k] = _mask(val) if _SECRET_RE.search(k) else val
+    status = registry.status()
+    result["_providers"] = {
+        kind: {p["id"]: p["configured"] for p in status[kind]["providers"]} for kind in ("stt", "tts", "llm")
+    }
+    result["_defaults"] = {kind: status[kind]["default"] for kind in ("stt", "tts", "llm", "translator")}
+    result["_memory"] = status["memory"]
+    result["_keys_configured"] = bool(status["stt"]["default"])
     return result
 
 
@@ -134,12 +197,28 @@ class SettingsPayload(BaseModel):
 
 @app.post("/api/settings")
 async def update_settings(payload: SettingsPayload):
-    allowed = {k: v for k, v in payload.settings.items() if k in MANAGED_ENV_KEYS}
+    allowed: dict[str, str] = {}
+    for k, v in payload.settings.items():
+        if k not in MANAGED_ENV_KEYS:
+            continue
+        v = (v or "").strip()
+        if _SECRET_RE.search(k) and "****" in v:
+            continue  # never write a masked value back over the real key
+        if "\n" in v or "\r" in v:
+            return JSONResponse({"error": f"Invalid value for {k}"}, status_code=400)
+        allowed[k] = v
     if not allowed:
         return JSONResponse({"error": "No valid settings provided"}, status_code=400)
     _write_env(allowed)
-    load_dotenv(override=True)
-    return {"updated": list(allowed.keys()), "message": "Settings saved. Restart translation session to apply."}
+    load_dotenv(ENV_PATH, override=True)
+    for k, v in allowed.items():
+        if v == "":
+            os.environ.pop(k, None)
+    if allowed.get("SUPERMEMORY_API_KEY"):
+        from supermemory import sync
+
+        background.spawn(sync.sync_pending(), name="memory-sync-after-settings")
+    return {"updated": list(allowed.keys()), "message": "Settings saved. New sessions use them immediately."}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -148,7 +227,7 @@ async def dashboard():
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
-# ── Voice Profile REST API (replaces Convex) ──────────────────────────
+# ── Voice Profile REST API ────────────────────────────────────────────
 
 
 class ProfilePayload(BaseModel):
@@ -176,11 +255,11 @@ class MemoryQueryPayload(BaseModel):
     tab_url: str | None = None
     container_tag: str | None = None
     scope: str | None = None
+    llm_answer: bool = True
 
 
 @app.get("/api/voice-profile")
 async def get_voice_profile(userId: str):
-    """Lookup a user's voice profile by userId — mirrors the old Convex HTTP endpoint."""
     profile = get_profile(userId)
     if not profile:
         return JSONResponse({"error": "Profile not found"}, status_code=404)
@@ -236,12 +315,13 @@ async def api_query_memories(payload: MemoryQueryPayload):
         return JSONResponse({"error": "Query is required"}, status_code=400)
 
     try:
-        return await query_memories(
+        result = await query_memories(
             query,
             limit=max(1, min(payload.limit, 8)),
             tab_url=payload.tab_url,
             container_tag=payload.container_tag,
             scope=payload.scope,
+            excerpt_limit=1200,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -258,492 +338,29 @@ async def api_query_memories(payload: MemoryQueryPayload):
             status_code=502,
         )
 
+    if payload.llm_answer:
+        from services.chat import compose_memory_answer
+
+        composed = await compose_memory_answer(query, result.get("memories", []))
+        if composed:
+            result["answer"] = composed
+            result["answer_source"] = "llm"
+    for memory in result.get("memories", []):
+        excerpt = memory.get("excerpt") or ""
+        if len(excerpt) > 320:
+            memory["excerpt"] = excerpt[:319].rstrip() + "…"
+    return result
+
+
+# ── Live audio WebSocket ──────────────────────────────────────────────
+
 
 @app.websocket("/ws/translate")
 async def websocket_translate(ws: WebSocket):
-    """
-    Main translation WebSocket endpoint.
-
-    Protocol:
-    - Client sends JSON config first: { type: "config", source_lang, target_lang }
-    - Client sends binary PCM audio chunks (16kHz, mono, int16)
-    - Server sends back:
-      - JSON: { type: "transcript", text: "...", is_final: bool }
-      - JSON: { type: "translated_text", text: "..." }
-      - Binary: translated audio (audio bytes from selected TTS provider)
-    """
-    await ws.accept()
-    logger.info("Client connected")
-
-    source_lang = "en"
-    target_lang = "es"
-    tab_url: str | None = None
-    tab_title: str | None = None
-
-    speechmatics_key = os.getenv("SPEECHMATICS_API_KEY", "")
-    minimax_key = os.getenv("MINIMAX_API_KEY", "")
-    minimax_group_id = os.getenv("MINIMAX_GROUP_ID", "")
-    use_speechmatics_translation = os.getenv(
-        "USE_SPEECHMATICS_TRANSLATION", "1"
-    ).strip().lower() not in {"0", "false", "no"}
-    tts_provider = os.getenv("TTS_PROVIDER", "azure").strip().lower() or "azure"
-    translation_trigger_chars = int(
-        os.getenv("TRANSLATION_TRIGGER_CHAR_THRESHOLD", "24")
-    )
-    translation_partial_min_delta_chars = int(
-        os.getenv("TRANSLATION_PARTIAL_MIN_DELTA_CHARS", "12")
-    )
-    translation_partial_min_interval = (
-        int(os.getenv("TRANSLATION_PARTIAL_MIN_INTERVAL_MS", "300")) / 1000.0
-    )
-
-    stt_provider = os.getenv("STT_PROVIDER", "azure").strip().lower() or "azure"
-    if stt_provider not in {"azure", "azure_diarize", "speechmatics"}:
-        stt_provider = "azure"
-
-    azure_key = os.getenv("AZURE_SPEECH_KEY", "")
-    azure_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
-
-    stt_client: SpeechmaticsClient | AzureTranslationClient | AzureConversationClient | None = None
-    minimax = MinimaxClient(api_key=minimax_key, group_id=minimax_group_id)
-    speechmatics_tts = SpeechmaticsTTSClient(api_key=speechmatics_key)
-    azure_tts = AzureTtsClient(api_key=azure_key, region=azure_region)
-    connection_open = True
-
-    # Buffer for accumulating transcript before translation
-    transcript_buffer = ""
-    translation_queue: asyncio.Queue[str | None] = asyncio.Queue()
-    translation_worker_task: asyncio.Task | None = None
-    translation_lock = asyncio.Lock()
-    sentence_counter = 0  # alternates voices for multi-speaker
-    supermemory_session: SupermemorySession | None = None
-
-    async def safe_send_json(payload: dict) -> bool:
-        nonlocal connection_open
-        if not connection_open:
-            return False
-        try:
-            await ws.send_json(payload)
-            return True
-        except (WebSocketDisconnect, RuntimeError):
-            connection_open = False
-            return False
-
-    async def safe_send_bytes(payload: bytes) -> bool:
-        nonlocal connection_open
-        if not connection_open:
-            return False
-        try:
-            await ws.send_bytes(payload)
-            return True
-        except (WebSocketDisconnect, RuntimeError):
-            connection_open = False
-            return False
-
-    async def enqueue_translation(text: str) -> None:
-        if not text.strip():
-            return
-        if not connection_open:
-            return
-        await translation_queue.put(text.strip())
-        logger.info("[Queue] enqueued (depth=%d): %s", translation_queue.qsize(), text[:60])
-
-    async def translation_worker() -> None:
-        while True:
-            item = await translation_queue.get()
-            try:
-                if item is None:
-                    logger.info("[Queue] worker got stop signal")
-                    return
-                logger.info("[Queue] processing: %s", item[:60])
-                if stt_provider in {"azure", "azure_diarize"} or use_speechmatics_translation:
-                    await speak_translated_text(item)
-                else:
-                    await translate_and_speak(item)
-            except Exception as e:
-                # Never let a single failure crash the worker — log and continue.
-                logger.error("translation_worker error (will continue): %s", e)
-            finally:
-                translation_queue.task_done()
-
-    async def on_transcript(text: str, is_final: bool):
-        """Called when STT produces a transcript segment."""
-        nonlocal transcript_buffer
-
-        if not connection_open:
-            return
-
-        try:
-            sent = await safe_send_json({
-                "type": "transcript",
-                "text": text,
-                "is_final": is_final,
-            })
-            if not sent:
-                return
-
-            if is_final and text.strip():
-                if supermemory_session:
-                    supermemory_session.add_transcript(text)
-
-                if stt_provider in {"azure", "azure_diarize"} or use_speechmatics_translation:
-                    return
-
-                transcript_buffer += " " + text.strip()
-
-                if (
-                    len(transcript_buffer) > translation_trigger_chars
-                    or transcript_buffer.rstrip().endswith((".", "!", "?", "。", "！", "？"))
-                ):
-                    await enqueue_translation(transcript_buffer.strip())
-                    transcript_buffer = ""
-        except (ConnectionError, RuntimeError) as e:
-            logger.error("Error in on_transcript: %s", e)
-
-    async def on_translation(text: str, is_final: bool):
-        """Called when translation produces translated text.
-
-        Partials are forwarded to the UI for live visual feedback.
-        TTS only fires on is_final to avoid mid-sentence audio ticks
-        from chunking artifacts (WAV headers, silence gaps). Azure
-        Translation already produces short finals (~5-8 words) so
-        latency stays low.
-        """
-        nonlocal sentence_counter
-        if not connection_open:
-            return
-
-        try:
-            if is_final:
-                sentence_counter += 1
-                sent = await safe_send_json({
-                    "type": "translated_text",
-                    "text": text,
-                })
-                if not sent:
-                    return
-                if text.strip():
-                    if supermemory_session:
-                        supermemory_session.add_translation(text.strip())
-                    await enqueue_translation(text.strip())
-            else:
-                await safe_send_json({
-                    "type": "translated_text_partial",
-                    "text": text,
-                })
-        except (ConnectionError, RuntimeError) as e:
-            logger.error("Error in on_translation: %s", e)
-
-    def _pad_wav_silence(wav_data: bytes, silence_ms: int = 150) -> bytes:
-        """Append silence to a 16kHz 16-bit mono WAV for natural sentence breaks."""
-        if len(wav_data) < 44 or silence_ms <= 0:
-            return wav_data
-        silence_bytes = int(16000 * 2 * silence_ms / 1000)
-        result = bytearray(wav_data)
-        # Update RIFF chunk size (offset 4) and data subchunk size (offset 40)
-        struct.pack_into('<I', result, 4, struct.unpack('<I', result[4:8])[0] + silence_bytes)
-        struct.pack_into('<I', result, 40, struct.unpack('<I', result[40:44])[0] + silence_bytes)
-        result.extend(b'\x00' * silence_bytes)
-        return bytes(result)
-
-    async def synthesize_tts_streaming(translated_text: str) -> None:
-        """Synthesize TTS and stream audio chunks to client as they arrive."""
-        if not connection_open or not translated_text.strip():
-            return
-
-        gender_hint: str | None = None
-        speaker_id: str | None = None
-        if isinstance(stt_client, (AzureTranslationClient, AzureConversationClient)):
-            gender_hint = stt_client.last_speaker_gender
-            speaker_id = stt_client.last_speaker_id
-
-        try:
-            if tts_provider == "azure":
-                audio_data = await azure_tts.text_to_speech(
-                    text=translated_text,
-                    language=target_lang,
-                    gender_hint=gender_hint,
-                    speaker_id=speaker_id,
-                )
-                if audio_data:
-                    # Pad silence for natural sentence breaks
-                    audio_data = _pad_wav_silence(audio_data, silence_ms=150)
-                    sent = await safe_send_bytes(audio_data)
-                    if sent:
-                        logger.info("[TTS] Sent %d bytes of audio for: %s", len(audio_data), translated_text[:60])
-                    return
-                logger.warning(
-                    "[TTS] Azure returned no audio for '%s' (target=%s) — falling back",
-                    translated_text[:60], target_lang,
-                )
-
-            if tts_provider == "speechmatics":
-                audio_data = await speechmatics_tts.text_to_speech(
-                    text=translated_text,
-                    language=target_lang,
-                )
-                if audio_data:
-                    sent = await safe_send_bytes(audio_data)
-                    if sent:
-                        logger.info("[TTS] Sent %d bytes of audio", len(audio_data))
-                    return
-
-            # Fallback to MiniMax
-            audio_data = await minimax.text_to_speech(
-                text=translated_text,
-                language=target_lang,
-            )
-            if audio_data:
-                sent = await safe_send_bytes(audio_data)
-                if sent:
-                    logger.info("[TTS] Sent %d bytes of audio (MiniMax)", len(audio_data))
-
-        except Exception as e:
-            logger.error("TTS synthesis error: %s", e)
-            await safe_send_json({
-                "type": "error",
-                "message": str(e),
-            })
-
-    def _chunk_for_tts(text: str, words_per_chunk: int = 5) -> list[str]:
-        """Split `text` into TTS-sized pieces of ~N words each.
-
-        Prefers breaking at punctuation (., !, ?, ,, ;, :) when a
-        punctuation token lands within two words of the target boundary,
-        so chunks follow natural prosody. Short inputs (<= N words) are
-        returned as a single chunk so we don't add chunk-boundary
-        artifacts to already-short utterances.
-        """
-        words = text.split()
-        if len(words) <= words_per_chunk:
-            return [text.strip()] if text.strip() else []
-
-        punct = (".", "!", "?", ",", ";", ":", "。", "！", "？", "，", "、")
-        chunks: list[str] = []
-        i = 0
-        while i < len(words):
-            target_end = min(i + words_per_chunk, len(words))
-            end = target_end
-            # Look for a nearby punctuation boundary to avoid splitting
-            # mid-clause. Scan a small window around the target.
-            for j in range(max(i, target_end - 2), min(len(words), target_end + 2)):
-                if words[j].rstrip().endswith(punct):
-                    end = j + 1
-                    break
-            if end <= i:
-                end = min(i + words_per_chunk, len(words))
-            piece = " ".join(words[i:end]).strip()
-            if piece:
-                chunks.append(piece)
-            i = end
-        return chunks
-
-    async def speak_translated_text(translated_text: str):
-        """Generate and stream TTS audio from already-translated text.
-
-        Called from the translation queue worker. The text has already been
-        sized appropriately (~5 words) by on_translation's partial-flush
-        logic, so we synthesize it as a single piece.
-        """
-        if not connection_open or not translated_text.strip():
-            return
-
-        try:
-            logger.info("[Translate] → %s", translated_text)
-            await synthesize_tts_streaming(translated_text)
-        except Exception as e:
-            logger.error("TTS error: %s", e)
-            await safe_send_json({
-                "type": "error",
-                "message": str(e),
-            })
-
-    async def translate_and_speak(text: str):
-        """Translate text and send back TTS audio."""
-        async with translation_lock:
-            if not connection_open or not text.strip():
-                return
-            try:
-                # Step 1: Translate via MiniMax LLM
-                src_name = get_language_name(source_lang)
-                tgt_name = get_language_name(target_lang)
-
-                translated_chunks: list[str] = []
-                translated = ""
-                last_partial_emit_at = 0.0
-                last_partial_emit_len = 0
-                async for chunk in minimax.translate_stream(
-                    text=text,
-                    source_language=src_name,
-                    target_language=tgt_name,
-                ):
-                    if not connection_open:
-                        return
-                    translated_chunks.append(chunk)
-                    translated = "".join(translated_chunks).strip()
-                    if translated:
-                        now = time.monotonic()
-                        delta_len = len(translated) - last_partial_emit_len
-                        should_emit_partial = (
-                            delta_len >= translation_partial_min_delta_chars
-                            or (now - last_partial_emit_at) >= translation_partial_min_interval
-                            or translated.endswith((".", "!", "?", "。", "！", "？"))
-                        )
-                        if should_emit_partial:
-                            sent = await safe_send_json({
-                                "type": "translated_text_partial",
-                                "text": translated,
-                            })
-                            if not sent:
-                                return
-                            last_partial_emit_at = now
-                            last_partial_emit_len = len(translated)
-
-                # Fallback if streaming returned no text.
-                if not translated:
-                    translated = await minimax.translate(
-                        text=text,
-                        source_language=src_name,
-                        target_language=tgt_name,
-                    ) or ""
-                translated = translated.strip()
-
-                if not translated:
-                    return
-
-                # Send translated text to client
-                sent = await safe_send_json({
-                    "type": "translated_text",
-                    "text": translated,
-                })
-                if not sent:
-                    return
-
-                logger.info("[Translate] %s → %s", text, translated)
-
-                # Step 2: TTS via MiniMax Speech
-                audio_data = await synthesize_tts(translated)
-
-                if audio_data:
-                    # Send binary audio back
-                    sent = await safe_send_bytes(audio_data)
-                    if sent:
-                        logger.info("[TTS] Sent %d bytes of audio", len(audio_data))
-
-            except (httpx.HTTPStatusError, ConnectionError, ValueError) as e:
-                logger.error("Translation/TTS error: %s", e)
-                await safe_send_json({
-                    "type": "error",
-                    "message": str(e),
-                })
-
-    try:
-        translation_worker_task = asyncio.create_task(translation_worker())
-
-        while True:
-            data = await ws.receive()
-            if data.get("type") == "websocket.disconnect":
-                connection_open = False
-                break
-
-            if "text" in data:
-                # JSON message
-                msg = json.loads(data["text"])
-
-                if msg.get("type") == "config":
-                    source_lang = msg.get("source_lang", "en")
-                    target_lang = msg.get("target_lang", "es")
-                    tab_url = msg.get("tab_url") or None
-                    tab_title = msg.get("tab_title") or None
-                    requested_tts_provider = str(msg.get("tts_provider", "")).strip().lower()
-                    if requested_tts_provider in {"minimax", "azure"}:
-                        tts_provider = requested_tts_provider
-                    # Force Azure TTS for streaming — speechmatics is non-streaming (slow)
-                    if tts_provider != "azure":
-                        tts_provider = "azure"
-                    sentence_counter = 0
-                    supermemory_session = SupermemorySession(
-                        source_lang=source_lang,
-                        target_lang=target_lang,
-                        tab_url=tab_url,
-                        tab_title=tab_title,
-                    )
-                    logger.info("Config: %s → %s", source_lang, target_lang)
-                    logger.info("STT provider: %s  TTS provider: %s", stt_provider, tts_provider)
-
-                    if stt_client:
-                        await stt_client.close()
-
-                    if stt_provider == "azure":
-                        stt_client = AzureTranslationClient(
-                            api_key=azure_key,
-                            region=azure_region,
-                            language=source_lang,
-                            target_language=target_lang,
-                            on_transcript=on_transcript,
-                            on_translation=on_translation,
-                        )
-                    elif stt_provider == "azure_diarize":
-                        stt_client = AzureConversationClient(
-                            api_key=azure_key,
-                            region=azure_region,
-                            language=source_lang,
-                            target_language=target_lang,
-                            on_transcript=on_transcript,
-                            on_translation=on_translation,
-                        )
-                    else:
-                        stt_client = SpeechmaticsClient(
-                            api_key=speechmatics_key,
-                            language=source_lang,
-                            target_language=target_lang if use_speechmatics_translation else None,
-                            on_transcript=on_transcript,
-                            on_translation=on_translation if use_speechmatics_translation else None,
-                        )
-                    await stt_client.connect()
-                    logger.info("STT client connected: provider=%s", stt_provider)
-
-                elif msg.get("type") == "stop":
-                    logger.info("Stop requested by client")
-                    if stt_client:
-                        await stt_client.close()
-                        stt_client = None
-                    # Drain pending translation
-                    while not translation_queue.empty():
-                        try:
-                            translation_queue.get_nowait()
-                            translation_queue.task_done()
-                        except asyncio.QueueEmpty:
-                            break
-                    await safe_send_json({"type": "stopped"})
-
-            elif "bytes" in data:
-                if stt_client and stt_client.is_connected:
-                    await stt_client.send_audio(data["bytes"])
-
-    except WebSocketDisconnect:
-        connection_open = False
-        logger.info("Client disconnected")
-    except RuntimeError as e:
-        connection_open = False
-        logger.error("WebSocket error: %s", e)
-    finally:
-        connection_open = False
-
-        if translation_worker_task:
-            # Signal worker to stop after processing remaining items.
-            # Do NOT drain the queue — let the worker finish what's pending.
-            await translation_queue.put(None)
-            try:
-                await asyncio.wait_for(translation_worker_task, timeout=15.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.warning("translation_worker did not finish in time")
-
-        if stt_client:
-            await stt_client.close()
-        if supermemory_session:
-            await supermemory_session.flush()
-        await speechmatics_tts.close()
-        await minimax.close()
-        await azure_tts.close()
-        logger.info("Session cleaned up")
+    """See services/session.py for the protocol."""
+    origin = ws.headers.get("origin")
+    if not origin_allowed(origin):
+        logger.warning("Rejected WebSocket from origin %s", origin)
+        await ws.close(code=1008)
+        return
+    await LiveSession(ws).run()

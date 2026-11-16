@@ -25,3 +25,8 @@ Thumbs.db
 .idea/
 
 
+
+# Generated test fixtures and evaluation reports
+backend/fixtures/*.wav
+backend/fixtures/reference.txt
+backend/reports/

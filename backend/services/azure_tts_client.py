@@ -35,8 +35,12 @@ _VOICE_POOL: dict[str, list[str]] = {
     "ko": ["ko-KR-InJoonNeural", "ko-KR-SunHiNeural", "ko-KR-BongJinNeural", "ko-KR-GookMinNeural"],
     "hi": ["hi-IN-MadhurNeural", "hi-IN-SwaraNeural"],
     "ar": ["ar-SA-HamedNeural", "ar-SA-ZariyahNeural"],
-    "ru": ["ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
-    # Fallbacks for any unmapped language
+    "ru": ["ru-RU-DmitryNeural", "ru-RU-SvetlanaNeural", "ru-RU-DariyaNeural"],
+    "nl": ["nl-NL-MaartenNeural", "nl-NL-ColetteNeural", "nl-NL-FennaNeural"],
+    "sv": ["sv-SE-MattiasNeural", "sv-SE-SofieNeural", "sv-SE-HilleviNeural"],
+    "pl": ["pl-PL-MarekNeural", "pl-PL-AgnieszkaNeural", "pl-PL-ZofiaNeural"],
+    "tr": ["tr-TR-AhmetNeural", "tr-TR-EmelNeural"],
+    # Languages not listed fall back to the English pool.
 }
 
 # Gender-mapped defaults (used when speaker_id is None)
@@ -65,6 +69,14 @@ _GENDER_DEFAULTS: dict[tuple[str, str], str] = {
     ("ar", "female"): "ar-SA-ZariyahNeural",
     ("ru", "male"): "ru-RU-DmitryNeural",
     ("ru", "female"): "ru-RU-SvetlanaNeural",
+    ("nl", "male"): "nl-NL-MaartenNeural",
+    ("nl", "female"): "nl-NL-ColetteNeural",
+    ("sv", "male"): "sv-SE-MattiasNeural",
+    ("sv", "female"): "sv-SE-SofieNeural",
+    ("pl", "male"): "pl-PL-MarekNeural",
+    ("pl", "female"): "pl-PL-AgnieszkaNeural",
+    ("tr", "male"): "tr-TR-AhmetNeural",
+    ("tr", "female"): "tr-TR-EmelNeural",
 }
 
 
@@ -84,7 +96,7 @@ class AzureTtsClient:
 
     def _pick_voice(self, language: str, gender_hint: str | None = None, speaker_id: str | None = None) -> str:
         """Pick a voice for the given language, optionally using speaker rotation."""
-        lang = (language or "en").strip().lower()
+        lang = (language or "en").strip().lower().split("-")[0]
 
         # Speaker-specific env override takes highest priority
         if speaker_id and speaker_id.isdigit():

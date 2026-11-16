@@ -1,0 +1,75 @@
+{
+  "title": "Mobile app launch sync",
+  "voices": {
+    "Maya": "Microsoft Zira Desktop",
+    "Daniel": "Microsoft David Desktop"
+  },
+  "lines": [
+    {"speaker": "Maya", "text": "Good morning Daniel, thanks for joining. Today I want to cover the mobile app launch, the payment provider, testing, and our meeting schedule. Let's start with the launch. Where are we with the release?"},
+    {"speaker": "Daniel", "text": "Morning Maya. Honestly, we are behind. The payment flow is not finished, and we still have a login crash on Android that affects about five percent of users. I don't think we can ship on September 30th without cutting corners."},
+    {"speaker": "Maya", "text": "How much more time do you need?"},
+    {"speaker": "Daniel", "text": "Two more weeks should be enough. If we move the launch to October 14th, the team can finish payments, fix the crash, and still run a proper beta."},
+    {"speaker": "Maya", "text": "Okay. Marketing will not love it, but a broken checkout would be worse. So we are agreed: the launch moves from September 30th to October 14th."},
+    {"speaker": "Daniel", "text": "Agreed."},
+    {"speaker": "Maya", "text": "Next, payments. Last week we were debating whether to build our own payment system or use Stripe. What is your recommendation?"},
+    {"speaker": "Daniel", "text": "Use Stripe. Building in-house would take at least two months, and we would have to handle compliance ourselves. Stripe gives us cards, Apple Pay and Google Pay out of the box, and the fees are about the same as the alternatives we looked at."},
+    {"speaker": "Maya", "text": "That makes sense. Let's make it official: we will use Stripe for payments and drop the in-house option. Daniel, can you own the integration?"},
+    {"speaker": "Daniel", "text": "Yes. I will finish the Stripe payment integration by October 3rd, so there is time to test it in the beta."},
+    {"speaker": "Maya", "text": "Great. Now testing. How many people signed up for the beta?"},
+    {"speaker": "Daniel", "text": "We have about 400 beta testers signed up so far, mostly from the waitlist. The problem is we don't have anyone dedicated to quality assurance. Our developers are testing their own features, and things slip through."},
+    {"speaker": "Maya", "text": "What do you suggest?"},
+    {"speaker": "Daniel", "text": "Hire a contract QA tester for six weeks. That covers the beta and the first two weeks after launch. I checked the rates, and it should cost around $12,000."},
+    {"speaker": "Maya", "text": "That fits in the budget. We have about $20,000 left for this quarter. Let's do it: we will hire one contract QA tester for six weeks. Can you post the job listing?"},
+    {"speaker": "Daniel", "text": "Sure, I will post the QA contractor job listing by Wednesday."},
+    {"speaker": "Maya", "text": "Perfect. And the Android login crash, when will that be fixed?"},
+    {"speaker": "Daniel", "text": "We found the cause. It is a token refresh bug in the authentication library. I will fix the login crash on Android before the beta build goes out on Monday."},
+    {"speaker": "Maya", "text": "Good. On my side, I will update the launch plan with the new date and send it to the marketing team by Friday. They need to move the press release and the app store campaign."},
+    {"speaker": "Daniel", "text": "Could you also check with design? The checkout screens changed because of Stripe, and Priya has not reviewed them yet."},
+    {"speaker": "Maya", "text": "Good point. I will schedule a design review with Priya for next Tuesday, and I will invite you too."},
+    {"speaker": "Daniel", "text": "Thanks. One open question: do we need a Spanish version of the app at launch? A lot of the beta testers asked for it."},
+    {"speaker": "Maya", "text": "I don't know yet. Let's not decide today. I will look at the waitlist data, and we can discuss it next week."},
+    {"speaker": "Daniel", "text": "Sounds good."},
+    {"speaker": "Maya", "text": "Last item: our weekly status meeting. Monday mornings keep clashing with sprint planning. Can we move it?"},
+    {"speaker": "Daniel", "text": "Thursday works better for engineering. How about Thursdays at 10 AM?"},
+    {"speaker": "Maya", "text": "Thursdays at 10 AM it is. Starting next week, the weekly status meeting moves to Thursday at 10 AM."},
+    {"speaker": "Maya", "text": "Let me recap. The launch moves to October 14th. We are using Stripe for payments. We are hiring a contract QA tester for six weeks. And the status meeting moves to Thursdays at 10 AM. Daniel, you have the Stripe integration by October 3rd, the QA job listing by Wednesday, and the Android login fix before Monday's beta build. I will send the launch plan to marketing by Friday and set up the design review with Priya on Tuesday. The Spanish version stays an open question."},
+    {"speaker": "Daniel", "text": "That's everything on my list. Thanks, Maya."},
+    {"speaker": "Maya", "text": "Thanks, Daniel. Talk to you on Thursday."}
+  ],
+  "s2s_clip": {
+    "voice": "Microsoft Zira Desktop",
+    "text": "Good morning everyone. The launch moves to October 14th. Please send me the updated plan by Friday. Thank you for your hard work this week."
+  },
+  "expected_decisions": [
+    {"label": "Launch moves to October 14", "keywords": [["launch", "release", "ship"], ["october 14", "oct 14", "14 october"]]},
+    {"label": "Use Stripe for payments", "keywords": [["stripe"]]},
+    {"label": "Hire a contract QA tester for six weeks", "keywords": [["qa", "tester", "quality"], ["6 week", "six week"]]},
+    {"label": "Weekly status meeting moves to Thursdays at 10 AM", "keywords": [["thursday"], ["10"]]}
+  ],
+  "expected_action_items": [
+    {"label": "Daniel: finish the Stripe payment integration by October 3", "owner": "daniel", "keywords": [["stripe", "payment"], ["october 3", "oct 3", "3 october"]]},
+    {"label": "Maya: send the updated launch plan to marketing by Friday", "owner": "maya", "keywords": [["plan"], ["marketing"]]},
+    {"label": "Daniel: post the QA contractor job listing by Wednesday", "owner": "daniel", "keywords": [["job", "listing", "posting", "post"], ["qa", "tester", "contractor", "quality"]]},
+    {"label": "Daniel: fix the Android login crash before Monday's beta build", "owner": "daniel", "keywords": [["login", "crash", "token"], ["android"]]},
+    {"label": "Maya: schedule a design review with Priya next Tuesday", "owner": "maya", "keywords": [["design"], ["review"]]}
+  ],
+  "qa": [
+    {"q": "What is the new launch date?", "a": "October 14th", "keywords": [["october 14", "oct 14", "14 october"]]},
+    {"q": "What was the original launch date?", "a": "September 30th", "keywords": [["september 30", "sept 30", "sep 30", "30 september"]]},
+    {"q": "Why is the launch being delayed?", "a": "The payment flow is unfinished and there is an Android login crash", "keywords": [["payment", "checkout", "login", "crash"]]},
+    {"q": "Which payment provider did they choose?", "a": "Stripe", "keywords": [["stripe"]]},
+    {"q": "Why didn't they build payments in-house?", "a": "It would take at least two months and they would have to handle compliance", "keywords": [["2 month", "two month", "compliance", "time", "longer"]]},
+    {"q": "Who is responsible for the payment integration?", "a": "Daniel", "keywords": [["daniel"]]},
+    {"q": "When is the payment integration due?", "a": "October 3rd", "keywords": [["october 3", "oct 3", "3 october"]]},
+    {"q": "How many beta testers have signed up?", "a": "About 400", "keywords": [["400", "four hundred"]]},
+    {"q": "How long is the QA contract?", "a": "Six weeks", "keywords": [["6 week", "six week"]]},
+    {"q": "How much will the QA contractor cost?", "a": "Around $12,000", "keywords": [["12000", "12 000", "12 thousand", "twelve thousand", "12k"]]},
+    {"q": "Who will post the QA job listing and by when?", "a": "Daniel, by Wednesday", "keywords": [["daniel"], ["wednesday"]]},
+    {"q": "What bug must be fixed before the beta build?", "a": "The Android login crash (token refresh bug)", "keywords": [["login", "token"], ["android", "crash"]]},
+    {"q": "When does the beta build go out?", "a": "Monday", "keywords": [["monday"]]},
+    {"q": "What will Maya send to the marketing team, and when?", "a": "The updated launch plan, by Friday", "keywords": [["plan"], ["friday"]]},
+    {"q": "Who will review the new checkout screens?", "a": "Priya, in a design review next Tuesday", "keywords": [["priya", "pria", "preya", "prya", "design"]]},
+    {"q": "When will the weekly status meeting happen from now on?", "a": "Thursdays at 10 AM", "keywords": [["thursday"], ["10"]]},
+    {"q": "What question was left open?", "a": "Whether to ship a Spanish version at launch", "keywords": [["spanish"]]}
+  ]
+}

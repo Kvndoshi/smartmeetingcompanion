@@ -58,7 +58,7 @@ def _pick_chunk(item: dict[str, Any]) -> tuple[str, float | None]:
     return best_text, best_score
 
 
-def _normalize_result(item: dict[str, Any]) -> MemorySearchResult | None:
+def _normalize_result(item: dict[str, Any], excerpt_limit: int = 240) -> MemorySearchResult | None:
     memory_text = item.get("memory")
     chunk_text = item.get("chunk")
     excerpt = ""
@@ -76,7 +76,7 @@ def _normalize_result(item: dict[str, Any]) -> MemorySearchResult | None:
         if chunk_score is not None:
             score = chunk_score
 
-    excerpt = _trim_text(excerpt)
+    excerpt = _trim_text(excerpt, limit=excerpt_limit)
     if not excerpt:
         return None
 
@@ -149,6 +149,7 @@ async def query_memories(
     tab_url: str | None = None,
     container_tag: str | None = None,
     scope: str | None = None,
+    excerpt_limit: int = 240,
 ) -> dict[str, Any]:
     headers = build_headers()
     payload = {
@@ -178,7 +179,7 @@ async def query_memories(
         normalized
         for item in raw_results
         if isinstance(item, dict)
-        for normalized in [_normalize_result(item)]
+        for normalized in [_normalize_result(item, excerpt_limit=excerpt_limit)]
         if normalized is not None
     ][:limit]
 

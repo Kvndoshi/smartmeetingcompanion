@@ -81,6 +81,10 @@ class MinimaxClient:
         self.text_model = os.getenv("MINIMAX_TEXT_MODEL", DEFAULT_TEXT_MODEL)
         self.tts_model = os.getenv("MINIMAX_TTS_MODEL", DEFAULT_TTS_MODEL)
         self.tts_voice_override = os.getenv("MINIMAX_TTS_VOICE_ID", "").strip()
+        # pcm @16 kHz so translated audio can also be injected into the Meet mic track;
+        # set MINIMAX_TTS_FORMAT=mp3 to restore the old behaviour.
+        self.tts_format = (os.getenv("MINIMAX_TTS_FORMAT", "pcm").strip() or "pcm").lower()
+        self.tts_sample_rate = int(os.getenv("MINIMAX_TTS_SAMPLE_RATE", "16000") or 16000)
         self.client = httpx.AsyncClient(timeout=30.0)
 
     @property
@@ -327,9 +331,9 @@ class MinimaxClient:
                 "pitch": 0,
             },
             "audio_setting": {
-                "sample_rate": 24000,
+                "sample_rate": self.tts_sample_rate if self.tts_format != "mp3" else 24000,
                 "bitrate": 128000,
-                "format": "mp3",
+                "format": self.tts_format,
                 "channel": 1,
             },
         }
