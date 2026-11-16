@@ -14,7 +14,7 @@ async function request(): Promise<void> {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => t.stop());
     await chrome.storage.local.set({ micPermission: "granted" });
-    show("Microphone allowed. You can close this tab and press Start in Distill.", true);
+    show("Microphone allowed — your voice is now included in the meeting notes. This tab closes by itself.", true);
     button.disabled = true;
     setTimeout(() => window.close(), 2500);
   } catch (err) {

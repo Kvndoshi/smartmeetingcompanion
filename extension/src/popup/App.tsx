@@ -118,7 +118,8 @@ export default function App() {
   const [sourceLang, setSourceLang] = useState("en");
   const [targetLang, setTargetLang] = useState("es");
   const [modes, setModes] = useState<Modes>({ translate: true, notes: true });
-  const [includeMic, setIncludeMic] = useState(false);
+  // On by default: your own voice is part of the meeting (Meet never plays it back in the tab).
+  const [includeMic, setIncludeMic] = useState(true);
   const [sttProvider, setSttProvider] = useState("");
   const [ttsProvider, setTtsProvider] = useState("");
   const [providers, setProviders] = useState<ProvidersStatus | null>(null);
@@ -330,6 +331,10 @@ export default function App() {
       tabId: targetTab?.id,
     });
     if (modes.notes) openPanel();
+    // First run: ask for the mic once, next to the meeting. Everyone else is already
+    // being transcribed; your voice joins as soon as you click Allow.
+    if (modes.notes && includeMic && micPermission !== "granted" && micPermission !== "denied")
+      ext.openTab(PERMISSIONS_PAGE, targetTab?.id);
     void started.then((res) => {
       setBusy(false);
       if (!res.success) setErrorMsg(res.error || "Failed to start capture");
@@ -489,7 +494,7 @@ export default function App() {
                 <input type="checkbox" checked={includeMic} onChange={(e) => toggleIncludeMic(e.target.checked)} disabled={!editable} />
                 <span>Include my microphone in the notes</span>
                 {includeMic && micPermission !== "granted" && (
-                  <button type="button" className="link-btn" onClick={() => ext.openTab(PERMISSIONS_PAGE)}>
+                  <button type="button" className="link-btn" onClick={() => ext.openTab(PERMISSIONS_PAGE, targetTab?.id)}>
                     Allow
                   </button>
                 )}

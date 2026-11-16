@@ -160,7 +160,9 @@ export type BackgroundRequest =
   | { type: "audio-data"; target: "background"; data: number[] }
   | { type: "mic-audio-data"; target: "background"; data: number[] }
   | { type: "offscreen-error"; target: "background"; channel: "capture" | "mic"; message: string; fatal?: boolean }
-  | { type: "outgoing-status"; target: "background"; ok: boolean; message?: string };
+  | { type: "outgoing-status"; target: "background"; ok: boolean; message?: string }
+  // Meet only: is your voice reaching the call (null = unknown)? Notes follow Meet's mute.
+  | { type: "meet-mic-state"; target: "background"; live: boolean | null };
 
 export interface BackgroundResponse {
   success: boolean;

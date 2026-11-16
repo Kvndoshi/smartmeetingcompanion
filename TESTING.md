@@ -82,9 +82,16 @@ Tab capture needs a real click on the toolbar icon, so these steps can't be auto
 - [ ] **Translate audio.** The original audio is replaced by the translated voice.
   - The translation line appears under each transcript line.
   - With no TTS key, the original audio stays audible and a warning shows.
-- [ ] Turn on **Include my microphone**.
-  - The permission page opens. Press **Allow microphone**, then the page closes itself.
-  - Start again. Your lines appear as **You**, interleaved with the other speakers.
+- [ ] **Your microphone (on by default).** On a fresh install, press **Start** with **Take notes** on.
+  - The "Allow microphone" page opens next to the meeting. The other participants are already being transcribed.
+  - Press **Allow microphone**. The page closes itself and focus returns to the meeting.
+  - Without restarting, your lines appear as **You**, interleaved with the other speakers.
+- [ ] **Meet mute.** While taking notes on Meet:
+  - Mute yourself in Meet and keep talking. No new **You** lines appear.
+  - Unmute. Your lines resume.
+- [ ] **Microphone blocked.** Block the microphone for the extension, then Start.
+  - The notes still capture the other participants.
+  - A warning explains how to allow the microphone, instead of an error.
 - [ ] **Service worker restart.** Mid-meeting:
   - Open `chrome://serviceworker-internals` (or `edge://serviceworker-internals`), find Distill and press **Stop**.
   - Within a few seconds, new lines keep arriving in the **same** meeting.

@@ -53,7 +53,10 @@ sequenceDiagram
     WS->>SM: upsert meeting document
 ```
 
-- **Your microphone in the notes.** The offscreen document opens the mic, after a one-time grant on `src/permissions/index.html`. It feeds a second WebSocket with `source:"mic"` and the same `meeting_id`, so your lines land in the same meeting as speaker `me`.
+- **Your microphone in the notes (on by default).** The meeting tab never contains your own voice, so the offscreen document opens the mic. This needs a one-time grant on `src/permissions/index.html`, which the popup opens on first Start; the mic joins automatically once granted. It feeds a second WebSocket with `source:"mic"` and the same `meeting_id`, so your lines land in the same meeting as speaker `me`.
+- **On Meet, the notes follow Meet's mute.** The interceptor reports whether your voice is actually reaching the call. While it isn't (muted, not joined yet, or left), the service worker sends silence on the mic socket, so muted speech never enters the notes.
+  - Signals checked: Meet's mute button, a sender Meet set to `null`, and a disabled or stopped mic track.
+  - "Unknown" never silences the notes.
 - **Outgoing translation (Meet only).** The interceptor patches `addTrack`, `addTransceiver` and `replaceTrack` and streams your mic PCM over a port to a third socket. That socket translates your speech into the meeting language. The translated WAVs play into a `MediaStreamDestination` whose track Meet sends to the other participants. When notes are on, this socket also transcribes you into the meeting, and the notes mic pauses.
 - **Resilience:**
   - Audio is sent continuously, silence included. It is buffered (up to 15 s) until the backend acks the config.

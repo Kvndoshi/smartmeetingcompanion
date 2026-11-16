@@ -823,7 +823,7 @@ class InterpreterWidget {
           sourceLang: this.sourceLang,
           targetLang: this.targetLang,
           modes,
-          includeMic: !!d.includeMic && modes.notes,
+          includeMic: d.includeMic !== false && modes.notes, // on unless turned off in the popup
           sttProvider: d.sttProvider || null,
           ttsProvider: modes.translate ? d.ttsProvider || null : null,
         },

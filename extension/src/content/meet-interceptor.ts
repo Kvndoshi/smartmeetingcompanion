@@ -35,6 +35,10 @@ const intended = new WeakMap<RTCRtpSender, MediaStreamTrack | null>();
 // Tracks that are never the microphone.
 const displayTracks = new WeakSet<MediaStreamTrack>(); // screen / tab share audio
 const replacementTracks = new WeakSet<MediaStreamTrack>(); // our translated outputs, current and past
+// Raw microphone tracks from getUserMedia (Meet may send a processed copy).
+const gumMicTracks = new Set<MediaStreamTrack>();
+// Have we ever seen Meet send the mic? Until then "is your voice in the call" is unknown.
+let sawMicSender = false;
 
 // Audio pipeline nodes
 let audioCtx: AudioContext | null = null;
@@ -375,6 +379,7 @@ function discoverAudioSenders(): void {
         if (senders.has(sender) || !isMicTrack(sender.track)) continue;
         senders.add(sender);
         intended.set(sender, sender.track);
+        sawMicSender = true;
       }
     } catch {
       // PC might be closed
@@ -497,6 +502,10 @@ window.RTCPeerConnection = function (...args: ConstructorParameters<typeof RTCPe
 window.RTCPeerConnection.prototype = _origPCConstructor.prototype;
 // Preserve static properties
 Object.setPrototypeOf(window.RTCPeerConnection, _origPCConstructor);
+// The legacy alias must build tracked connections too, or their senders get pruned.
+if ('webkitRTCPeerConnection' in window) {
+  (window as unknown as { webkitRTCPeerConnection: typeof RTCPeerConnection }).webkitRTCPeerConnection = window.RTCPeerConnection;
+}
 
 /** Which track to hand Meet for a newly added mic track. */
 function trackToSend(track: MediaStreamTrack): MediaStreamTrack {
@@ -517,6 +526,7 @@ RTCPeerConnection.prototype.addTrack = function (
   const sender = _origAddTrack.call(this, sending, ...streams);
   senders.add(sender);
   intended.set(sender, track);
+  sawMicSender = true;
   if (active && sending !== replacementTrack) void rewire(track);
   return sender;
 };
@@ -544,6 +554,7 @@ RTCPeerConnection.prototype.addTransceiver = function (
   const transceiver = _origAddTransceiver.call(this, sending, init);
   senders.add(transceiver.sender);
   intended.set(transceiver.sender, track);
+  sawMicSender = true;
   if (active && sending !== replacementTrack) void rewire(track);
   return transceiver;
 };
@@ -569,6 +580,7 @@ RTCRtpSender.prototype.replaceTrack = function (
   realTrack = newTrack;
   senders.add(this);
   intended.set(this, newTrack);
+  sawMicSender = true;
   if (!active) return _origReplaceTrack.call(this, newTrack);
 
   // Rebuild for the new mic, then point every sender (including this one) at
@@ -600,6 +612,7 @@ navigator.mediaDevices.getUserMedia = async function (
   } else {
     console.log('[Interceptor] getUserMedia returned audio track:', audioTracks[0].label);
     realTrack = audioTracks[0];
+    for (const track of audioTracks) gumMicTracks.add(track);
   }
   return stream;
 };
@@ -623,6 +636,45 @@ MediaStreamTrack.prototype.clone = function (this: MediaStreamTrack): MediaStrea
   return copy;
 };
 
+// ─── Is your voice reaching the call? ─────────────────────────────────────────
+// Meeting notes should only contain what was said in the meeting, so the notes
+// mic follows Meet's mute. Reported as true / false, or null while unknown (e.g.
+// no mic sender seen yet) — unknown never silences the notes.
+
+/** Meet's own mic button, when present (English UI): true = muted. */
+function meetMuteButton(): boolean | null {
+  const button = document.querySelector('[data-is-muted][aria-label*="microphone" i]');
+  return button ? button.getAttribute('data-is-muted') === 'true' : null;
+}
+
+function voiceReachesCall(): boolean | null {
+  if (meetMuteButton() === true) return false;
+  discoverAudioSenders();
+  if (!sawMicSender) return null;
+  let sending = false;
+  for (const sender of senders) {
+    const track = intended.get(sender);
+    if (track && track.readyState === 'live' && track.enabled) {
+      sending = true;
+      break;
+    }
+  }
+  if (!sending) return false; // muted (sender detached / track disabled or stopped) or left the call
+  // Meet may send a processed copy and mute the raw microphone track instead.
+  for (const track of gumMicTracks) if (track.readyState !== 'live') gumMicTracks.delete(track);
+  if (gumMicTracks.size > 0 && ![...gumMicTracks].some((t) => t.enabled)) return false;
+  return true;
+}
+
+let lastVoiceInCall: boolean | null | undefined;
+function reportVoiceInCall(force = false): void {
+  const live = voiceReachesCall();
+  if (!force && live === lastVoiceInCall) return;
+  lastVoiceInCall = live;
+  window.postMessage({ source: 'interpreter-ext', type: 'interpreter-mic-state', live }, '*');
+}
+setInterval(() => reportVoiceInCall(), 400);
+
 // ─── postMessage listener ─────────────────────────────────────────────────────
 
 window.addEventListener('message', (event: MessageEvent) => {
@@ -637,6 +689,10 @@ window.addEventListener('message', (event: MessageEvent) => {
 
     case 'interpreter-deactivate':
       void deactivate();
+      break;
+
+    case 'interpreter-mic-state-request':
+      reportVoiceInCall(true);
       break;
 
     case 'interpreter-translated-audio': {

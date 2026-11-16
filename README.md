@@ -74,8 +74,11 @@ Then open `chrome://extensions` (or `edge://extensions`), turn on **Developer mo
 1. Open your meeting tab and click the Distill toolbar icon.
 2. Pick the modes you want:
    - **Translate audio**: hear the meeting translated.
-   - **Take notes**: get the transcript, summary and chat.
-   - Optionally turn on **Include my microphone**. A one-time permission page opens.
+   - **Take notes**: get the transcript, summary and chat. Notes contain everything said in the meeting:
+     - The other participants come from the tab audio.
+     - You come from your microphone. **Include my microphone** is on by default, because the meeting tab never plays your own voice back.
+     - The first time you press Start, a one-time "Allow microphone" page opens next to the meeting. Your voice joins the notes as soon as you allow it.
+     - On Google Meet, the notes follow Meet's mute: nothing you say while muted, or before joining the call, is transcribed.
 3. Choose languages and, optionally, providers. Then press **Start**. The notes side panel opens with the live transcript.
 4. The side panel has four tabs:
    - **Live**: the transcript. You can rename speakers and type your own notes.

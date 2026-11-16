@@ -16,6 +16,9 @@ const MSG_SOURCE = "interpreter-ext";
 const PORT_NAME = "mic-capture";
 
 let micPort: chrome.runtime.Port | null = null;
+// Is your voice reaching the call? true / false, or null while unknown.
+// The service worker uses it so the notes only contain what was said in the meeting.
+let voiceInCall: boolean | null = null;
 
 function log(...args: unknown[]): void {
   console.log(LOG_PREFIX, ...args);
@@ -88,6 +91,9 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
       deactivateMicCapture();
       sendResponse({ success: true });
       return;
+    case "get-meet-mic-state":
+      sendResponse({ live: voiceInCall });
+      return;
     default:
       return; // not ours — let the widget's listener handle it
   }
@@ -124,9 +130,17 @@ window.addEventListener("message", (event: MessageEvent) => {
       if (!ok) void reported.then(() => deactivateMicCapture());
       return;
     }
+    case "interpreter-mic-state": {
+      voiceInCall = typeof msg.live === "boolean" ? msg.live : null;
+      chrome.runtime.sendMessage({ type: "meet-mic-state", target: "background", live: voiceInCall }).catch(() => {});
+      return;
+    }
     default:
       return;
   }
 });
+
+// The interceptor may have reported before this listener existed.
+postToInterceptor("interpreter-mic-state-request");
 
 log("Bridge installed and ready");

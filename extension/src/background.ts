@@ -439,8 +439,31 @@ function scheduleReconnect(): void {
 
 // ── Your microphone in the notes (offscreen getUserMedia) ───────────
 
+// Meeting notes hold what was said in the meeting. On Meet the interceptor
+// reports whether your voice is actually reaching the call (false while muted
+// or before joining); unknown tabs / platforms keep transcribing you.
+const voiceInCall = new Map<number, boolean | null>();
+
+function isMutedInMeeting(): boolean {
+  return state.tabId !== null && voiceInCall.get(state.tabId) === false;
+}
+
+function refreshVoiceInCall(tabId: number | null): void {
+  if (tabId === null) return;
+  chrome.tabs
+    .sendMessage(tabId, { type: "get-meet-mic-state" })
+    .then((res: { live?: boolean | null } | undefined) => {
+      if (res && "live" in res) voiceInCall.set(tabId, typeof res.live === "boolean" ? res.live : null);
+    })
+    .catch(() => {}); // not a Meet tab (no bridge) → stays unknown
+}
+
+const MIC_NOT_ALLOWED =
+  "Your microphone isn't allowed yet, so only the other participants are in the notes. Open Distill and click Allow next to “Include my microphone”.";
+
 async function startNotesMic(): Promise<void> {
   if (micSession || !state.meetingId) return;
+  refreshVoiceInCall(state.tabId);
   setState({ micStatus: "starting" });
   micSession = new BackendSession(
     "mic",
@@ -484,10 +507,20 @@ async function startNotesMic(): Promise<void> {
     if (!res?.success) throw new Error(res?.error || "Microphone unavailable");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    reportError("mic", `Microphone: ${message}. Grant access from the popup (Include my mic → Allow).`);
+    // Capture of everyone else carries on; once access is granted the mic joins automatically.
+    if (/permission|notallowed/i.test(message)) broadcast({ target: "ui", type: "warning", message: MIC_NOT_ALLOWED });
+    else reportError("mic", `Microphone: ${message}`);
     await stopNotesMic("error");
   }
 }
+
+// Mic access granted from the permissions page mid-meeting → add your voice now.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || changes.micPermission?.newValue !== "granted") return;
+  void ensureRestored().then(() => {
+    if (state.isCapturing && state.includeMic && state.modes.notes && !micSession && !state.isMicTranslating) void startNotesMic();
+  });
+});
 
 async function stopNotesMic(status: "idle" | "error" = "idle"): Promise<void> {
   const session = micSession;
@@ -749,7 +782,16 @@ async function handle(message: BackgroundRequest | Record<string, any>, sender: 
       tabSession?.sendAudio(toArrayBuffer(message.data));
       return undefined;
     case "mic-audio-data":
-      micSession?.sendAudio(toArrayBuffer(message.data));
+      if (!micSession) return undefined;
+      if (state.tabId !== null && !voiceInCall.has(state.tabId)) {
+        voiceInCall.set(state.tabId, null); // ask once (e.g. after a service-worker restart)
+        refreshVoiceInCall(state.tabId);
+      }
+      // Muted in Meet: what you say isn't part of the meeting — send silence, keep the stream alive.
+      micSession.sendAudio(isMutedInMeeting() ? new ArrayBuffer(message.data.length) : toArrayBuffer(message.data));
+      return undefined;
+    case "meet-mic-state":
+      if (typeof sender.tab?.id === "number") voiceInCall.set(sender.tab.id, typeof message.live === "boolean" ? message.live : null);
       return undefined;
     case "start-capture":
       try {
@@ -823,6 +865,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  voiceInCall.delete(tabId);
   if (tabId === state.tabId && state.isCapturing) void stopCapture(true);
   if (tabId === outgoing?.tabId) void stopMicTranslation();
 });

@@ -75,11 +75,12 @@ export const ext = {
     return chrome.sidePanel.open({ windowId });
   },
 
-  openTab(path: string): void {
+  /** Opens an extension page; with an opener it sits next to that tab and returns there on close. */
+  openTab(path: string, openerTabId?: number): void {
     if (!hasRuntime) {
       window.open(path, "_blank");
       return;
     }
-    void chrome.tabs.create({ url: chrome.runtime.getURL(path) });
+    void chrome.tabs.create({ url: chrome.runtime.getURL(path), ...(openerTabId !== undefined ? { openerTabId } : {}) });
   },
 };
