@@ -120,7 +120,19 @@ function postOut(msg: Omit<InterpreterMessage, 'source'>, transfer?: Transferabl
 
 // ─── Audio Pipeline ───────────────────────────────────────────────────────────
 
-async function setupPipeline(track: MediaStreamTrack): Promise<void> {
+// The track the current pipeline was built from (null when torn down).
+let pipelineTrack: MediaStreamTrack | null = null;
+// Pipeline (re)builds are serialised: Meet can fire addTrack + replaceTrack in
+// quick succession, and two overlapping builds would leak an AudioContext.
+let pipelineLock: Promise<void> = Promise.resolve();
+
+function setupPipeline(track: MediaStreamTrack): Promise<void> {
+  pipelineLock = pipelineLock.then(() => buildPipeline(track)).catch(() => {});
+  return pipelineLock;
+}
+
+async function buildPipeline(track: MediaStreamTrack): Promise<void> {
+  if (pipelineTrack === track && replacementTrack && audioCtx?.state !== 'closed') return;
   try {
     teardownPipeline();
 
@@ -138,7 +150,6 @@ async function setupPipeline(track: MediaStreamTrack): Promise<void> {
     if (typeof ctxWithSink.setSinkId === 'function') {
       try {
         await ctxWithSink.setSinkId({ type: 'none' });
-        console.log('[Interceptor] AudioContext sink set to "none" (silent)');
       } catch (err) {
         console.warn('[Interceptor] setSinkId({type:"none"}) unsupported:', err);
       }
@@ -162,7 +173,7 @@ async function setupPipeline(track: MediaStreamTrack): Promise<void> {
 
     workletNode.port.onmessage = (event: MessageEvent<Float32Array>) => {
       const inputData = event.data;
-      if (!(inputData instanceof Float32Array) || !audioCtx) return;
+      if (!(inputData instanceof Float32Array) || !audioCtx || !active) return;
 
       const downsampled = downsampleBuffer(inputData, audioCtx.sampleRate, 16000);
       const pcm = floatTo16BitPCM(downsampled);
@@ -172,22 +183,19 @@ async function setupPipeline(track: MediaStreamTrack): Promise<void> {
 
     destination = audioCtx.createMediaStreamDestination();
 
+    // Only capture PCM from the mic; the destination (what Meet sends) carries
+    // nothing but the translated audio injected by playTranslated().
     micSource.connect(workletNode);
-    // workletNode output is not connected to destination intentionally:
-    // we only want to capture PCM, not re-route mic audio to the destination.
-    // The destination only receives translated audio injected via playTranslated().
 
-    // Grab the replacement track from the destination stream
     const destTracks = destination.stream.getAudioTracks();
     if (destTracks.length === 0) {
       throw new Error('[Interceptor] MediaStreamDestination produced no audio tracks');
     }
     replacementTrack = destTracks[0];
+    pipelineTrack = track;
 
     // Mirror enabled (mute) state from the real track
     startEnabledMirror(track);
-
-    postOut({ type: 'interpreter-track-attached' });
     console.log('[Interceptor] Audio pipeline ready, replacementTrack:', replacementTrack.id);
   } catch (err) {
     console.error('[Interceptor] Failed to set up audio pipeline — using passthrough:', err);
@@ -216,6 +224,10 @@ function teardownPipeline(): void {
     audioCtx = null;
   }
   replacementTrack = null;
+  pipelineTrack = null;
+  // A new AudioContext's clock starts at 0 — a stale schedule time from the old
+  // context would delay every translated chunk.
+  nextPlaybackTime = 0;
 }
 
 // ─── Mute mirroring ───────────────────────────────────────────────────────────
@@ -242,51 +254,39 @@ function stopEnabledMirror(): void {
 // plays smoothly without overlaps or gaps.
 let nextPlaybackTime = 0;
 
-// Azure TTS is configured server-side as Riff16Khz16BitMonoPcm. Azure streams
-// synthesis incrementally: the FIRST chunk carries the RIFF/WAVE header, but
-// subsequent chunks are raw Int16 PCM continuations with no header. So per
-// chunk we strip any RIFF preamble we find and treat the remainder as raw PCM.
-const TTS_SAMPLE_RATE = 16000;
+// Sample rate of headerless continuation chunks (taken from the last WAV header).
+let lastSampleRate = 16000;
 
 /**
- * If `bytes` begins with a RIFF/WAVE header, return the payload offset and
- * exact data chunk size. Otherwise return {offset: 0, size: bytes.length}
- * (treat as raw PCM continuation, size = full buffer).
- *
- * Returning the exact size is important: the backend pads with 150 ms of
- * silence and updates the data-chunk size accordingly, but there can still
- * be trailing bytes (alignment, extra chunks) beyond the real samples. We
- * must clamp playback to the declared data size to avoid reading stale
- * bytes that sound like tail-end word repetition.
+ * Locate the PCM payload. Complete WAVs (what the backend sends per utterance)
+ * yield their declared sample rate and exact data size; anything without a
+ * RIFF header is treated as raw Int16 PCM at the last seen rate.
  */
-function stripRiffHeader(bytes: Uint8Array): { offset: number; size: number } {
-  if (bytes.length < 12) return { offset: 0, size: bytes.length };
+function parseAudioChunk(bytes: Uint8Array): { offset: number; size: number; sampleRate: number } {
+  const raw = { offset: 0, size: bytes.length, sampleRate: lastSampleRate };
+  if (bytes.length < 12) return raw;
   // 'RIFF' ... 'WAVE'
-  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) {
-    return { offset: 0, size: bytes.length };
-  }
-  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) {
-    return { offset: 0, size: bytes.length };
-  }
+  if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return raw;
+  if (bytes[8] !== 0x57 || bytes[9] !== 0x41 || bytes[10] !== 0x56 || bytes[11] !== 0x45) return raw;
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = 12;
+  let sampleRate = lastSampleRate;
   while (offset + 8 <= bytes.length) {
-    const chunkId = String.fromCharCode(
-      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
-    );
+    const chunkId = String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
     const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === 'data') {
+    if (chunkId === 'fmt ' && offset + 16 <= bytes.length) {
+      sampleRate = view.getUint32(offset + 12, true) || sampleRate;
+    } else if (chunkId === 'data') {
       const dataStart = offset + 8;
-      const available = bytes.length - dataStart;
+      lastSampleRate = sampleRate;
       // Clamp: never read past what's actually in the buffer.
-      const size = Math.min(chunkSize, available);
-      return { offset: dataStart, size };
+      return { offset: dataStart, size: Math.min(chunkSize, bytes.length - dataStart), sampleRate };
     }
-    offset += 8 + chunkSize;
+    offset += 8 + chunkSize + (chunkSize & 1);
   }
-  // Malformed header — skip standard 44-byte prefix as a fallback.
-  return { offset: 44, size: Math.max(0, bytes.length - 44) };
+  // Malformed header — skip the standard 44-byte prefix as a fallback.
+  return { offset: 44, size: Math.max(0, bytes.length - 44), sampleRate };
 }
 
 function playTranslated(audioBytes: number[]): void {
@@ -296,7 +296,7 @@ function playTranslated(audioBytes: number[]): void {
   }
 
   const bytes = new Uint8Array(audioBytes);
-  const { offset: pcmOffset, size: pcmByteLength } = stripRiffHeader(bytes);
+  const { offset: pcmOffset, size: pcmByteLength, sampleRate } = parseAudioChunk(bytes);
 
   if (pcmByteLength < 2) {
     console.warn('[Interceptor] playTranslated: empty PCM payload');
@@ -308,7 +308,7 @@ function playTranslated(audioBytes: number[]): void {
     // DataView handles non-aligned offsets that Int16Array would reject.
     const view = new DataView(bytes.buffer, bytes.byteOffset + pcmOffset, pcmByteLength);
     const frameCount = pcmByteLength >> 1;
-    const buffer = audioCtx.createBuffer(1, frameCount, TTS_SAMPLE_RATE);
+    const buffer = audioCtx.createBuffer(1, frameCount, sampleRate);
     const channelData = buffer.getChannelData(0);
     for (let i = 0; i < frameCount; i++) {
       channelData[i] = view.getInt16(i * 2, true) / 32768;
@@ -323,46 +323,77 @@ function playTranslated(audioBytes: number[]): void {
     const startAt = Math.max(now, nextPlaybackTime);
     source.start(startAt);
     nextPlaybackTime = startAt + buffer.duration;
-
-    console.log(
-      '[Interceptor] Playing translated chunk:',
-      buffer.duration.toFixed(2), 's',
-      pcmOffset > 0 ? '(RIFF stripped, data=' + pcmByteLength + 'B)' : '(raw PCM)'
-    );
   } catch (err) {
     console.error('[Interceptor] PCM playback failed:', err);
   }
 }
 
-// Reset the playback scheduler when the pipeline deactivates so stale
-// `nextPlaybackTime` from a previous session doesn't delay a new one.
-function resetPlaybackQueue(): void {
-  nextPlaybackTime = 0;
+// ─── Sender bookkeeping ───────────────────────────────────────────────────────
+
+/** Forget closed peer connections and senders that no longer belong to a live one. */
+function pruneClosed(): void {
+  const live = new Set<RTCRtpSender>();
+  for (const pc of peerConnections) {
+    if (pc.signalingState === 'closed') {
+      peerConnections.delete(pc);
+      continue;
+    }
+    try {
+      for (const s of pc.getSenders()) live.add(s);
+    } catch {
+      peerConnections.delete(pc);
+    }
+  }
+  for (const s of senders) if (!live.has(s)) senders.delete(s);
 }
 
-// ─── Find all audio senders across tracked peer connections ─────────────────
+function isUsableTrack(track: MediaStreamTrack | null): track is MediaStreamTrack {
+  return !!track && track.readyState === 'live' && track !== replacementTrack;
+}
 
 function discoverAudioSenders(): void {
+  pruneClosed();
   for (const pc of peerConnections) {
     try {
-      const pcSenders = pc.getSenders();
-      for (const sender of pcSenders) {
-        if (sender.track && sender.track.kind === 'audio') {
-          if (!senders.has(sender)) {
-            console.log('[Interceptor] Discovered audio sender via getSenders()');
-            senders.add(sender);
-            // If we don't have a realTrack yet, grab it from this sender
-            if (!realTrack) {
-              realTrack = sender.track;
-              console.log('[Interceptor] Captured realTrack from sender:', realTrack.label);
-            }
-          }
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== 'audio') continue;
+        senders.add(sender);
+        // Prefer a live mic track (never our own replacement) as the source.
+        if (!isUsableTrack(realTrack) && isUsableTrack(sender.track)) {
+          realTrack = sender.track;
+          console.log('[Interceptor] Captured realTrack from sender:', realTrack.label);
         }
       }
     } catch {
       // PC might be closed
     }
   }
+}
+
+/** Point every tracked audio sender at `track`. */
+async function swapAllSenders(track: MediaStreamTrack | null): Promise<void> {
+  pruneClosed();
+  await Promise.all(
+    [...senders].map((sender) =>
+      sender.track === track
+        ? Promise.resolve()
+        : _origReplaceTrack.call(sender, track).catch((err: Error) => {
+            console.error('[Interceptor] replaceTrack failed:', err);
+          })
+    )
+  );
+}
+
+/** (Re)build the pipeline for `track` and route every sender to the translated output. */
+async function rewire(track: MediaStreamTrack): Promise<void> {
+  await setupPipeline(track);
+  if (!active) return;
+  // If the pipeline couldn't be built, fall back to the real mic rather than silence.
+  await swapAllSenders(replacementTrack ?? track);
+}
+
+function postActivationResult(ok: boolean, message?: string): void {
+  window.postMessage({ source: 'interpreter-ext', type: 'interpreter-activation-result', ok, message }, '*');
 }
 
 // ─── Activate / Deactivate ────────────────────────────────────────────────────
@@ -374,22 +405,22 @@ async function activate(): Promise<void> {
   // Discover any senders we might have missed (e.g. from addTransceiver)
   discoverAudioSenders();
 
-  if (realTrack) {
-    await setupPipeline(realTrack);
+  if (!isUsableTrack(realTrack)) {
+    console.warn('[Interceptor] No live microphone track found');
+    active = false;
+    postActivationResult(false, 'Join the call with your microphone on first, then turn on voice translation.');
+    return;
+  }
 
-    if (replacementTrack) {
-      console.log('[Interceptor] Swapping', senders.size, 'sender(s) to replacement track');
-      for (const sender of senders) {
-        try {
-          await _origReplaceTrack.call(sender, replacementTrack);
-          console.log('[Interceptor] replaceTrack succeeded on sender');
-        } catch (err) {
-          console.error('[Interceptor] replaceTrack (activate) failed:', err);
-        }
-      }
-    }
+  await rewire(realTrack);
+  if (!active) return; // deactivated while the pipeline was building
+  if (replacementTrack) {
+    console.log('[Interceptor] Routing', senders.size, 'sender(s) through the translated track');
+    postActivationResult(true);
   } else {
-    console.warn('[Interceptor] No realTrack found yet — will intercept when Meet adds one');
+    active = false;
+    await swapAllSenders(realTrack);
+    postActivationResult(false, "Couldn't attach to your microphone in this call.");
   }
 }
 
@@ -398,18 +429,10 @@ async function deactivate(): Promise<void> {
   active = false;
 
   // Swap senders back to the real track before tearing down the pipeline
-  if (realTrack) {
-    for (const sender of senders) {
-      try {
-        await _origReplaceTrack.call(sender, realTrack);
-      } catch (err) {
-        console.error('[Interceptor] replaceTrack (deactivate) failed:', err);
-      }
-    }
-  }
+  if (isUsableTrack(realTrack)) await swapAllSenders(realTrack);
 
+  await pipelineLock;
   teardownPipeline();
-  resetPlaybackQueue();
 }
 
 // ─── RTCPeerConnection / RTCRtpSender patching ───────────────────────────────
@@ -424,125 +447,74 @@ const _origPCConstructor = window.RTCPeerConnection;
 // @ts-expect-error — overriding global constructor
 window.RTCPeerConnection = function (...args: ConstructorParameters<typeof RTCPeerConnection>): RTCPeerConnection {
   const pc = new _origPCConstructor(...args);
+  pruneClosed();
   peerConnections.add(pc);
-  console.log('[Interceptor] New RTCPeerConnection created, total:', peerConnections.size);
   return pc;
 };
 window.RTCPeerConnection.prototype = _origPCConstructor.prototype;
 // Preserve static properties
 Object.setPrototypeOf(window.RTCPeerConnection, _origPCConstructor);
 
+/** Which track to hand Meet for a newly added mic track. */
+function trackToSend(track: MediaStreamTrack): MediaStreamTrack {
+  return active && replacementTrack && pipelineTrack === track ? replacementTrack : track;
+}
+
 // Patch addTrack
 RTCPeerConnection.prototype.addTrack = function (
   track: MediaStreamTrack,
   ...streams: MediaStream[]
 ): RTCRtpSender {
-  if (track.kind !== 'audio') {
+  if (track.kind !== 'audio' || track === replacementTrack) {
     return _origAddTrack.call(this, track, ...streams);
   }
 
-  console.log('[Interceptor] addTrack intercepted, audio track:', track.label);
   realTrack = track;
-
-  let sender: RTCRtpSender;
-
-  if (active && replacementTrack) {
-    sender = _origAddTrack.call(this, replacementTrack, ...streams);
-  } else if (active && !replacementTrack) {
-    sender = _origAddTrack.call(this, track, ...streams);
-    senders.add(sender);
-    void setupPipeline(track).then(() => {
-      if (active && replacementTrack) {
-        _origReplaceTrack.call(sender, replacementTrack).catch((err: Error) => {
-          console.error('[Interceptor] async replaceTrack failed:', err);
-        });
-      }
-    });
-    return sender;
-  } else {
-    sender = _origAddTrack.call(this, track, ...streams);
-  }
-
+  const sending = trackToSend(track);
+  const sender = _origAddTrack.call(this, sending, ...streams);
   senders.add(sender);
-  postOut({ type: 'interpreter-track-attached' });
+  if (active && sending !== replacementTrack) void rewire(track);
   return sender;
 };
 
-// Patch addTransceiver — Google Meet uses this instead of addTrack
+// Patch addTransceiver — Google Meet uses this instead of addTrack. A kind-only
+// call ('audio') passes straight through; its sender is picked up later by the
+// replaceTrack patch or discoverAudioSenders().
 RTCPeerConnection.prototype.addTransceiver = function (
   trackOrKind: MediaStreamTrack | string,
   init?: RTCRtpTransceiverInit
 ): RTCRtpTransceiver {
-  // Determine if this is an audio track being added
-  const isAudioTrack = trackOrKind instanceof MediaStreamTrack && trackOrKind.kind === 'audio';
-  const isAudioKind = typeof trackOrKind === 'string' && trackOrKind === 'audio';
-
-  if (!isAudioTrack) {
+  if (!(trackOrKind instanceof MediaStreamTrack) || trackOrKind.kind !== 'audio' || trackOrKind === replacementTrack) {
     return _origAddTransceiver.call(this, trackOrKind, init);
   }
 
-  const track = trackOrKind as MediaStreamTrack;
-  console.log('[Interceptor] addTransceiver intercepted, audio track:', track.label);
+  const track = trackOrKind;
   realTrack = track;
-
-  let transceiver: RTCRtpTransceiver;
-
-  if (active && replacementTrack) {
-    transceiver = _origAddTransceiver.call(this, replacementTrack, init);
-  } else if (active && !replacementTrack) {
-    transceiver = _origAddTransceiver.call(this, track, init);
-    senders.add(transceiver.sender);
-    void setupPipeline(track).then(() => {
-      if (active && replacementTrack) {
-        _origReplaceTrack.call(transceiver.sender, replacementTrack).catch((err: Error) => {
-          console.error('[Interceptor] async transceiver replaceTrack failed:', err);
-        });
-      }
-    });
-    return transceiver;
-  } else {
-    transceiver = _origAddTransceiver.call(this, track, init);
-  }
-
+  const sending = trackToSend(track);
+  const transceiver = _origAddTransceiver.call(this, sending, init);
   senders.add(transceiver.sender);
-  postOut({ type: 'interpreter-track-attached' });
+  if (active && sending !== replacementTrack) void rewire(track);
   return transceiver;
 };
 
-// Also handle addTransceiver('audio', {}) — kind string without a track
-// Meet might create a transceiver with just the kind, then set the track later via replaceTrack
-const _origAddTransceiverKind = RTCPeerConnection.prototype.addTransceiver;
-// We already patched addTransceiver above; for the string-kind case, senders are
-// captured via the RTCRtpSender.replaceTrack patch below when Meet assigns a real track.
-
-// Patch replaceTrack on RTCRtpSender
+// Patch replaceTrack on RTCRtpSender (Meet uses it for mic switches / unmute)
 RTCRtpSender.prototype.replaceTrack = function (
   newTrack: MediaStreamTrack | null
 ): Promise<void> {
-  if (newTrack && newTrack.kind === 'audio') {
-    // Check if this is our own replacement call (avoid infinite loop)
-    if (newTrack === replacementTrack) {
-      return _origReplaceTrack.call(this, newTrack);
-    }
-
-    console.log('[Interceptor] replaceTrack intercepted, new audio track:', newTrack.label);
-    realTrack = newTrack;
-    senders.add(this);
-
-    if (active) {
-      // Re-wire the pipeline with the new real track
-      void setupPipeline(newTrack).then(() => {
-        if (active && replacementTrack) {
-          _origReplaceTrack.call(this, replacementTrack).catch((err: Error) => {
-            console.error('[Interceptor] re-wire replaceTrack failed:', err);
-          });
-        }
-      });
-      return Promise.resolve();
-    }
+  if (!newTrack || newTrack.kind !== 'audio' || newTrack === replacementTrack) {
+    return _origReplaceTrack.call(this, newTrack);
   }
 
-  return _origReplaceTrack.call(this, newTrack);
+  realTrack = newTrack;
+  senders.add(this);
+  if (!active) return _origReplaceTrack.call(this, newTrack);
+
+  // Rebuild for the new mic, then point every sender (including this one) at
+  // the new translated track — or at the real mic if the rebuild failed.
+  return rewire(newTrack).then(() => {
+    const target = active && replacementTrack ? replacementTrack : newTrack;
+    if (this.track !== target) return _origReplaceTrack.call(this, target);
+  });
 };
 
 // ─── getUserMedia override — catch the mic track early ──────────────────────

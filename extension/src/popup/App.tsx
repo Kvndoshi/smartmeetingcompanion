@@ -1,39 +1,39 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-
-function formatDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  const mm = String(m).padStart(2, "0");
-  const ss = String(s).padStart(2, "0");
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
-}
-import { LANGUAGES } from "../utils/languages";
+import { useCallback, useEffect, useRef, useState } from "react";
 import logo from "../logo.png";
+import { api } from "../shared/api";
+import { BACKEND_HTTP_URL } from "../shared/config";
+import { ext } from "../shared/ext";
+import { formatDuration, useBackendHealth, useElapsed, useSessionState, useTheme } from "../shared/hooks";
+import { speakerLabel, type Modes, type ProviderInfo, type ProvidersStatus, type Source } from "../shared/protocol";
+import { LANGUAGES } from "../utils/languages";
 import MemoriesTab from "./MemoriesTab";
-
-interface TranscriptEntry {
-  original: string;
-  translated: string;
-  timestamp: number;
-}
 
 interface AudioDevice {
   deviceId: string;
   label: string;
 }
 
+interface PreviewLine {
+  key: string;
+  source: Source;
+  speaker: string | null;
+  text: string;
+  translation: string;
+  segmentId?: number;
+}
+
 type PickerMediaDevices = MediaDevices & {
   selectAudioOutput?: (options?: { deviceId?: string }) => Promise<MediaDeviceInfo>;
 };
 
-type ExtStatus = "idle" | "connected" | "capturing" | "disconnected" | "error";
-type PopupTab = "translate" | "memories";
-const PICK_OUTPUT_OPTION_VALUE = "__pick_output_device__";
+type PopupTab = "session" | "memories";
+type MicPermission = "granted" | "prompt" | "denied" | "unknown";
 
-/* ═══════════════════════════════════════════
-   SVG Icon Components
-   ═══════════════════════════════════════════ */
+const PICK_OUTPUT_OPTION_VALUE = "__pick_output_device__";
+const PERMISSIONS_PAGE = "src/permissions/index.html";
+const MAX_PREVIEW_LINES = 30;
+
+/* ── Icons ── */
 
 const WaveformBars = ({ active }: { active: boolean }) => (
   <svg viewBox="0 0 32 20" fill="currentColor" className={`waveform-svg ${active ? "waveform-active" : ""}`}>
@@ -72,303 +72,339 @@ const RefreshIcon = () => (
   </svg>
 );
 
-const TranscriptIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
+function isCapturableUrl(url?: string): boolean {
+  if (!url) return true;
+  return !/^(chrome|chrome-extension|edge|devtools|about):/i.test(url);
+}
 
-/* ═══════════════════════════════════════════
-   Main App
-   ═══════════════════════════════════════════ */
+function ProviderSelect({
+  label,
+  value,
+  onChange,
+  providers,
+  defaultId,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  providers: ProviderInfo[];
+  defaultId: string | null;
+  disabled: boolean;
+}) {
+  const defaultLabel = providers.find((p) => p.id === defaultId)?.label;
+  return (
+    <label className="provider-field">
+      <span className="provider-label">{label}</span>
+      <select className="output-select" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+        <option value="">{defaultLabel ? `Auto (${defaultLabel})` : "Auto"}</option>
+        {providers.map((p) => (
+          <option key={p.id} value={p.id} disabled={!p.configured}>
+            {p.label}
+            {p.configured ? "" : " — no key"}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<PopupTab>("translate");
+  const [theme, toggleTheme] = useTheme();
+  const session = useSessionState();
+  const { online, recheck } = useBackendHealth();
+
+  const [activeTab, setActiveTab] = useState<PopupTab>("session");
   const [sourceLang, setSourceLang] = useState("en");
   const [targetLang, setTargetLang] = useState("es");
-  const [status, setStatus] = useState<ExtStatus>("idle");
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
-  const [currentOriginal, setCurrentOriginal] = useState("");
-  const [currentTranslated, setCurrentTranslated] = useState("");
+  const [modes, setModes] = useState<Modes>({ translate: true, notes: true });
+  const [includeMic, setIncludeMic] = useState(false);
+  const [sttProvider, setSttProvider] = useState("");
+  const [ttsProvider, setTtsProvider] = useState("");
+  const [providers, setProviders] = useState<ProvidersStatus | null>(null);
+  const [micPermission, setMicPermission] = useState<MicPermission>("unknown");
   const [errorMsg, setErrorMsg] = useState("");
-  const [theme, setTheme] = useState<"dark" | "light">("light");
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<PreviewLine[]>([]);
+  const [partial, setPartial] = useState<{ source: Source; speaker: string | null; text: string; translation?: string } | null>(null);
+  const [targetTab, setTargetTab] = useState<{ id?: number; url?: string; title?: string; windowId?: number } | null>(null);
 
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState("");
-
-  const canPickOutputDevice =
-    typeof (navigator.mediaDevices as PickerMediaDevices).selectAudioOutput === "function";
-
-  const [elapsed, setElapsed] = useState(0);
-  const captureStartedAtRef = useRef<number | null>(null);
-
-  const transcriptRef = useRef<HTMLDivElement>(null);
   const selectedDeviceRef = useRef("");
+  const lineCounter = useRef(0);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  const isCapturing = !!session?.isCapturing;
+  const isStarting = busy || session?.status === "connecting";
+  const elapsed = useElapsed(session?.captureStartedAt, isCapturing);
+  const canPickOutputDevice = typeof (navigator.mediaDevices as PickerMediaDevices).selectAudioOutput === "function";
+
+  // ── Initial load ──
+  useEffect(() => {
+    void ext
+      .storageGet<{
+        sourceLang: string;
+        targetLang: string;
+        outputDeviceId: string;
+        modes: Modes;
+        includeMic: boolean;
+        sttProvider: string;
+        ttsProvider: string;
+      }>(["sourceLang", "targetLang", "outputDeviceId", "modes", "includeMic", "sttProvider", "ttsProvider"])
+      .then((d) => {
+        if (d.sourceLang) setSourceLang(d.sourceLang);
+        if (d.targetLang) setTargetLang(d.targetLang);
+        if (d.modes && typeof d.modes.translate === "boolean") setModes(d.modes);
+        if (typeof d.includeMic === "boolean") setIncludeMic(d.includeMic);
+        if (typeof d.sttProvider === "string") setSttProvider(d.sttProvider);
+        if (typeof d.ttsProvider === "string") setTtsProvider(d.ttsProvider);
+        if (d.outputDeviceId) {
+          selectedDeviceRef.current = d.outputDeviceId;
+          setSelectedDevice(d.outputDeviceId);
+        }
+        void loadOutputDevices();
+      });
+    void ext.activeTab().then(setTargetTab);
+    navigator.permissions
+      ?.query({ name: "microphone" as PermissionName })
+      .then((status) => {
+        setMicPermission(status.state as MicPermission);
+        status.onchange = () => setMicPermission(status.state as MicPermission);
+      })
+      .catch(() => setMicPermission("unknown"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
-    if (!isCapturing || !captureStartedAtRef.current) {
-      setElapsed(0);
-      return;
-    }
-    setElapsed(Math.floor((Date.now() - captureStartedAtRef.current) / 1000));
-    const id = setInterval(() => {
-      if (captureStartedAtRef.current) {
-        setElapsed(Math.floor((Date.now() - captureStartedAtRef.current) / 1000));
+    if (online !== true) return;
+    api
+      .providers()
+      .then(setProviders)
+      .catch(() => setProviders(null));
+  }, [online]);
+
+  const persist = (values: Record<string, unknown>) => ext.storageSet(values);
+
+  // ── Live preview (the side panel has the full transcript) ──
+  useEffect(() => {
+    return ext.onUiMessage((msg) => {
+      if (msg.type === "transcript") {
+        if (!msg.isFinal) {
+          setPartial({ source: msg.source, speaker: msg.speaker, text: msg.text });
+          return;
+        }
+        setPartial(null);
+        setLines((prev) => {
+          if (msg.segmentId && prev.some((l) => l.segmentId === msg.segmentId)) return prev;
+          const line: PreviewLine = {
+            key: `l${++lineCounter.current}`,
+            source: msg.source,
+            speaker: msg.speaker,
+            text: msg.text,
+            translation: "",
+            segmentId: msg.segmentId,
+          };
+          return [...prev, line].slice(-MAX_PREVIEW_LINES);
+        });
+      } else if (msg.type === "translation") {
+        if (!msg.isFinal) {
+          setPartial((p) => (p ? { ...p, translation: msg.text } : p));
+          return;
+        }
+        setLines((prev) => {
+          let idx = msg.segmentId ? prev.findIndex((l) => l.segmentId === msg.segmentId) : -1;
+          if (idx < 0) {
+            for (let i = prev.length - 1; i >= 0; i--) {
+              if (prev[i].source === msg.source && !prev[i].translation) {
+                idx = i;
+                break;
+              }
+            }
+          }
+          if (idx < 0) {
+            const line: PreviewLine = { key: `l${++lineCounter.current}`, source: msg.source, speaker: msg.speaker, text: "", translation: msg.text };
+            return [...prev, line].slice(-MAX_PREVIEW_LINES);
+          }
+          const next = [...prev];
+          next[idx] = { ...next[idx], translation: msg.text };
+          return next;
+        });
+      } else if (msg.type === "error") {
+        setErrorMsg(msg.message);
       }
-    }, 1000);
-    return () => clearInterval(id);
-  }, [isCapturing]);
+    });
+  }, []);
 
   useEffect(() => {
-    selectedDeviceRef.current = selectedDevice;
-  }, [selectedDevice]);
+    if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+  }, [lines, partial]);
 
+  // ── Output devices (translated audio) ──
   const applyOutputDevices = useCallback((devices: AudioDevice[]) => {
     setOutputDevices(devices);
-    const selected = selectedDeviceRef.current;
-    if (selected && devices.some((d) => d.deviceId === selected)) return;
-    if (selected) return;
+    if (selectedDeviceRef.current) return;
     const blackhole = devices.find((d) => d.label.toLowerCase().includes("blackhole"));
     if (!blackhole) return;
     selectedDeviceRef.current = blackhole.deviceId;
     setSelectedDevice(blackhole.deviceId);
-    chrome.storage.sync.set({ outputDeviceId: blackhole.deviceId });
-    chrome.runtime.sendMessage({
-      type: "set-output-device",
-      target: "background",
-      deviceId: blackhole.deviceId,
-    });
+    ext.storageSet({ outputDeviceId: blackhole.deviceId });
+    void ext.send({ type: "set-output-device", target: "background", deviceId: blackhole.deviceId });
   }, []);
 
   const loadOutputDevices = useCallback(async () => {
     try {
-      const allDevices = await navigator.mediaDevices.enumerateDevices();
-      const outputMap = new Map<string, AudioDevice>();
-      for (const device of allDevices) {
-        if (device.kind !== "audiooutput") continue;
-        if (!device.deviceId || device.deviceId === "default") continue;
-        if (outputMap.has(device.deviceId)) continue;
-        outputMap.set(device.deviceId, {
-          deviceId: device.deviceId,
-          label: device.label || `Output ${device.deviceId.slice(0, 8)}`,
-        });
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const map = new Map<string, AudioDevice>();
+      for (const d of all) {
+        if (d.kind !== "audiooutput" || !d.deviceId || d.deviceId === "default" || map.has(d.deviceId)) continue;
+        map.set(d.deviceId, { deviceId: d.deviceId, label: d.label || `Output ${d.deviceId.slice(0, 8)}` });
       }
-      applyOutputDevices(Array.from(outputMap.values()));
+      applyOutputDevices([...map.values()]);
     } catch (err) {
       console.error("[Popup] Failed to enumerate output devices:", err);
     }
   }, [applyOutputDevices]);
 
-  const pickOutputDevice = useCallback(async (): Promise<AudioDevice | null> => {
-    const mediaDevices = navigator.mediaDevices as PickerMediaDevices;
-    if (typeof mediaDevices.selectAudioOutput !== "function") return null;
-    try {
-      const picked = await mediaDevices.selectAudioOutput(
-        selectedDeviceRef.current ? { deviceId: selectedDeviceRef.current } : undefined
-      );
-      return { deviceId: picked.deviceId, label: picked.label || "Selected output device" };
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const requestMicPermissionForLabels = useCallback(async (): Promise<boolean> => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((track) => track.stop());
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
-
-  useEffect(() => {
-    chrome.storage.sync.get(
-      ["sourceLang", "targetLang", "outputDeviceId"],
-      (data) => {
-        if (data.sourceLang) setSourceLang(data.sourceLang);
-        if (data.targetLang) setTargetLang(data.targetLang);
-        if (data.outputDeviceId) {
-          selectedDeviceRef.current = data.outputDeviceId;
-          setSelectedDevice(data.outputDeviceId);
-        }
-        void loadOutputDevices();
-      }
-    );
-    chrome.runtime.sendMessage({ type: "get-state", target: "background" }, (res) => {
-      if (res) {
-        if (res.captureStartedAt) {
-          captureStartedAtRef.current = res.captureStartedAt;
-        }
-        setIsCapturing(res.isCapturing);
-        setStatus(res.isCapturing ? "capturing" : "idle");
-      }
-    });
-  }, [loadOutputDevices]);
+  const chooseDevice = (deviceId: string) => {
+    selectedDeviceRef.current = deviceId;
+    setSelectedDevice(deviceId);
+    ext.storageSet({ outputDeviceId: deviceId });
+    void ext.send({ type: "set-output-device", target: "background", deviceId });
+  };
 
   const refreshDevices = async () => {
     await loadOutputDevices();
     if (canPickOutputDevice) {
-      const picked = await pickOutputDevice();
-      if (!picked) return;
-      selectedDeviceRef.current = picked.deviceId;
-      setSelectedDevice(picked.deviceId);
-      chrome.storage.sync.set({ outputDeviceId: picked.deviceId });
-      chrome.runtime.sendMessage({
-        type: "set-output-device",
-        target: "background",
-        deviceId: picked.deviceId,
-      });
-      await loadOutputDevices();
+      try {
+        const picked = await (navigator.mediaDevices as PickerMediaDevices).selectAudioOutput!(
+          selectedDeviceRef.current ? { deviceId: selectedDeviceRef.current } : undefined
+        );
+        chooseDevice(picked.deviceId);
+        await loadOutputDevices();
+      } catch {
+        /* picker dismissed */
+      }
       return;
     }
-    const granted = await requestMicPermissionForLabels();
-    await loadOutputDevices();
-    if (!granted) {
-      setErrorMsg("Use System Default and set macOS output to BlackHole 2ch.");
-      setStatus("error");
-      setTimeout(() => setErrorMsg(""), 7000);
+    if (micPermission !== "granted") {
+      setErrorMsg("Device names appear after microphone access is granted.");
+      ext.openTab(PERMISSIONS_PAGE);
     }
   };
 
-  const handleDeviceChange = async (deviceId: string) => {
-    if (deviceId === PICK_OUTPUT_OPTION_VALUE) {
-      await refreshDevices();
-      return;
-    }
-    setSelectedDevice(deviceId);
-    chrome.storage.sync.set({ outputDeviceId: deviceId });
-    chrome.runtime.sendMessage({
-      type: "set-output-device",
+  // ── Controls ──
+  const setMode = (key: keyof Modes, value: boolean) => {
+    const next = { ...modes, [key]: value };
+    setModes(next);
+    persist({ modes: next });
+  };
+
+  const toggleIncludeMic = (value: boolean) => {
+    setIncludeMic(value);
+    persist({ includeMic: value });
+    if (value && micPermission !== "granted") ext.openTab(PERMISSIONS_PAGE);
+  };
+
+  const openPanel = () => {
+    void ext.openSidePanel(targetTab?.windowId).catch((err: Error) => setErrorMsg(err.message));
+  };
+
+  const handleStart = () => {
+    setErrorMsg("");
+    setLines([]);
+    setPartial(null);
+    setBusy(true);
+    if (selectedDevice) void ext.send({ type: "set-output-device", target: "background", deviceId: selectedDevice });
+    // Send first, then open the panel — both synchronously inside the click so the
+    // side panel still counts as user-initiated and the start survives the popup closing.
+    const started = ext.send({
+      type: "start-capture",
       target: "background",
-      deviceId,
+      sourceLang,
+      targetLang,
+      modes,
+      includeMic: modes.notes && includeMic,
+      sttProvider: sttProvider || null,
+      ttsProvider: modes.translate ? ttsProvider || null : null,
+      tabId: targetTab?.id,
+    });
+    if (modes.notes) openPanel();
+    void started.then((res) => {
+      setBusy(false);
+      if (!res.success) setErrorMsg(res.error || "Failed to start capture");
     });
   };
 
-  useEffect(() => {
-    const listener = (message: any) => {
-      if (message.target !== "popup") return;
-      switch (message.type) {
-        case "status":
-          setStatus(message.status);
-          if (message.status === "idle") setIsCapturing(false);
-          if (message.status === "capturing") setIsCapturing(true);
-          break;
-        case "transcript":
-          if (message.isFinal) {
-            setCurrentOriginal((prev) => (prev + " " + message.text).trim());
-          } else {
-            setCurrentOriginal(message.text);
-          }
-          break;
-        case "translated-text":
-          setCurrentTranslated(message.text);
-          setTranscripts((prev) => [
-            ...prev,
-            { original: currentOriginal, translated: message.text, timestamp: Date.now() },
-          ]);
-          setCurrentOriginal("");
-          setCurrentTranslated("");
-          break;
-        case "translated-text-partial":
-          setCurrentTranslated(message.text);
-          break;
-        case "error":
-          setErrorMsg(message.message);
-          setStatus("error");
-          setTimeout(() => setErrorMsg(""), 5000);
-          break;
-      }
-    };
-    chrome.runtime.onMessage.addListener(listener);
-    return () => chrome.runtime.onMessage.removeListener(listener);
-  }, [currentOriginal]);
-
-  useEffect(() => {
-    if (transcriptRef.current) {
-      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
-    }
-  }, [transcripts, currentOriginal, currentTranslated]);
-
-  const handleToggle = useCallback(async () => {
-    if (isCapturing) {
-      chrome.runtime.sendMessage({ type: "stop-capture", target: "background" });
-    } else {
-      setErrorMsg("");
-      const [activeTab] = await chrome.tabs.query({
-        active: true,
-        lastFocusedWindow: true,
-      });
-      const tabId = activeTab?.id;
-      if (selectedDevice) {
-        chrome.runtime.sendMessage({
-          type: "set-output-device",
-          target: "background",
-          deviceId: selectedDevice,
-        });
-      }
-      chrome.runtime.sendMessage({
-        type: "start-capture",
-        target: "background",
-        sourceLang,
-        targetLang,
-        tabId,
-      }, (response) => {
-        if (chrome.runtime.lastError) {
-          setStatus("error");
-          setErrorMsg(chrome.runtime.lastError.message || "Failed to start capture");
-          return;
-        }
-        if (!response?.success) {
-          setStatus("error");
-          setErrorMsg(response?.error || "Failed to start capture");
-          return;
-        }
-        captureStartedAtRef.current = Date.now();
-        setIsCapturing(true);
-        setStatus("capturing");
-      });
-    }
-  }, [isCapturing, sourceLang, targetLang, selectedDevice]);
+  const handleStop = async () => {
+    setBusy(true);
+    const res = await ext.send({ type: "stop-capture", target: "background", endMeeting: true });
+    setBusy(false);
+    if (!res.success) setErrorMsg(res.error || "Failed to stop");
+  };
 
   const handleSwap = () => {
     setSourceLang(targetLang);
     setTargetLang(sourceLang);
-    chrome.storage.sync.set({ sourceLang: targetLang, targetLang: sourceLang });
+    persist({ sourceLang: targetLang, targetLang: sourceLang });
   };
 
-  const getStatusText = (): string => {
-    switch (status) {
-      case "idle": return "Ready";
-      case "connected": return "Connected";
-      case "capturing": return "Translating live";
-      case "disconnected": return "Disconnected";
-      case "error": return errorMsg || "Error";
-      default: return "Ready";
+  // ── Derived UI state ──
+  const sttConfigured = providers ? providers.stt.providers.some((p) => p.configured) : true;
+  const ttsConfigured = providers ? providers.tts.providers.some((p) => p.configured) : true;
+  const llmConfigured = providers ? providers.llm.providers.some((p) => p.configured) : true;
+  const tabCapturable = isCapturableUrl(targetTab?.url);
+  const noMode = !modes.translate && !modes.notes;
+
+  const startBlocker =
+    online === false
+      ? "Start the backend first"
+      : !sttConfigured
+        ? "Add a speech-to-text key in Settings"
+        : noMode
+          ? "Pick Translate audio and/or Take notes"
+          : !tabCapturable
+            ? "Open your meeting tab, then click Distill"
+            : "";
+
+  const statusText = (() => {
+    if (!session) return "Ready";
+    switch (session.status) {
+      case "connecting":
+        return "Connecting…";
+      case "reconnecting":
+        return "Reconnecting to backend…";
+      case "capturing":
+        return session.modes.translate && session.modes.notes
+          ? "Translating & taking notes"
+          : session.modes.translate
+            ? "Translating live"
+            : "Taking notes";
+      case "error":
+        return session.lastError || "Error";
+      default:
+        return "Ready";
     }
-  };
+  })();
+  const statusDot =
+    session?.status === "capturing" ? "capturing" : session?.status === "error" ? "error" : session?.status === "connecting" || session?.status === "reconnecting" ? "connected" : "idle";
 
-  const getSelectedDeviceLabel = (): string => {
-    const device = outputDevices.find((d) => d.deviceId === selectedDevice);
-    return device?.label || "Default";
-  };
+  const selectedDeviceLabel = outputDevices.find((d) => d.deviceId === selectedDevice)?.label ?? "";
+  const editable = !isCapturing && !isStarting;
+  const sttInfo = providers?.stt.providers.find((p) => p.id === (sttProvider || providers.stt.default));
 
   return (
     <div className={`app ${theme}`}>
-      {/* Header */}
       <div className="header">
         <div className="header-logo">
           <img src={logo} alt="Distill logo" className="header-logo-image" />
         </div>
         <div className="header-text">
           <div className="header-title">Distill</div>
-          <div className="header-subtitle">Live Translation</div>
+          <div className="header-subtitle">Translate · Transcribe · Summarize</div>
         </div>
-        {isCapturing && (
-          <span className="header-timer">{formatDuration(elapsed)}</span>
-        )}
-        <button className="theme-toggle" onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
+        {isCapturing && <span className="header-timer">{formatDuration(elapsed)}</span>}
+        <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme" type="button">
           {theme === "dark" ? "☀︎" : "◗"}
         </button>
         <div className={`header-waveform ${isCapturing ? "active" : ""}`}>
@@ -376,22 +412,46 @@ export default function App() {
         </div>
       </div>
 
-      {/* Status */}
       <div className="status-bar">
-        <span className={`status-dot ${status}`} />
-        <span>{getStatusText()}</span>
+        <span className={`status-dot ${statusDot}`} />
+        <span className="status-text">{statusText}</span>
+        {session?.isCapturing && session.activeProviders.stt && (
+          <span className="status-providers">
+            {session.activeProviders.stt}
+            {session.activeProviders.tts ? ` → ${session.activeProviders.tts}` : ""}
+          </span>
+        )}
       </div>
+
+      {online === false && (
+        <div className="banner error" style={{ marginTop: 8 }}>
+          <span>
+            Backend offline. In <code>backend/</code> run <code>uv run uvicorn main:app --port 8000</code>.
+          </span>
+          <button type="button" onClick={recheck}>
+            Retry
+          </button>
+        </div>
+      )}
+      {errorMsg && (
+        <div className="banner error" style={{ marginTop: 8 }}>
+          <span>{errorMsg}</span>
+          <button type="button" onClick={() => setErrorMsg("")} aria-label="Dismiss">
+            ×
+          </button>
+        </div>
+      )}
 
       <div className="content">
         <div className="tab-switcher" role="tablist" aria-label="Distill popup sections">
           <button
-            className={`tab-switcher-btn ${activeTab === "translate" ? "active" : ""}`}
-            onClick={() => setActiveTab("translate")}
+            className={`tab-switcher-btn ${activeTab === "session" ? "active" : ""}`}
+            onClick={() => setActiveTab("session")}
             type="button"
             role="tab"
-            aria-selected={activeTab === "translate"}
+            aria-selected={activeTab === "session"}
           >
-            Translate
+            Session
           </button>
           <button
             className={`tab-switcher-btn ${activeTab === "memories" ? "active" : ""}`}
@@ -404,10 +464,40 @@ export default function App() {
           </button>
         </div>
 
-        {activeTab === "translate" ? (
+        {activeTab === "session" ? (
           <>
+            <div className="mode-grid">
+              <label className={`mode-card ${modes.translate ? "on" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={modes.translate}
+                  onChange={(e) => setMode("translate", e.target.checked)}
+                  disabled={!editable}
+                />
+                <span className="mode-title">Translate audio</span>
+                <span className="mode-desc">Hear the meeting in your language</span>
+              </label>
+              <label className={`mode-card ${modes.notes ? "on" : ""}`}>
+                <input type="checkbox" checked={modes.notes} onChange={(e) => setMode("notes", e.target.checked)} disabled={!editable} />
+                <span className="mode-title">Take notes</span>
+                <span className="mode-desc">Transcript, summary &amp; chat</span>
+              </label>
+            </div>
+
+            {modes.notes && (
+              <label className="check-row">
+                <input type="checkbox" checked={includeMic} onChange={(e) => toggleIncludeMic(e.target.checked)} disabled={!editable} />
+                <span>Include my microphone in the notes</span>
+                {includeMic && micPermission !== "granted" && (
+                  <button type="button" className="link-btn" onClick={() => ext.openTab(PERMISSIONS_PAGE)}>
+                    Allow
+                  </button>
+                )}
+              </label>
+            )}
+
             <div>
-              <div className="section-label">Languages</div>
+              <div className="section-label">{modes.translate ? "Languages" : "Meeting language"}</div>
               <div className="lang-section" style={{ marginTop: 6 }}>
                 <div className="lang-group">
                   <select
@@ -415,108 +505,163 @@ export default function App() {
                     value={sourceLang}
                     onChange={(e) => {
                       setSourceLang(e.target.value);
-                      chrome.storage.sync.set({ sourceLang: e.target.value });
+                      persist({ sourceLang: e.target.value });
                     }}
-                    disabled={isCapturing}
+                    disabled={!editable}
+                    aria-label="Spoken language"
                   >
                     {LANGUAGES.map((l) => (
-                      <option key={l.code} value={l.code}>{l.name}</option>
+                      <option key={l.code} value={l.code}>
+                        {l.name}
+                      </option>
                     ))}
                   </select>
                 </div>
-
-                <button className="lang-swap" onClick={handleSwap} disabled={isCapturing} title="Swap languages">
-                  <span>⇄</span>
-                </button>
-
-                <div className="lang-group">
-                  <select
-                    className="lang-select"
-                    value={targetLang}
-                    onChange={(e) => {
-                      setTargetLang(e.target.value);
-                      chrome.storage.sync.set({ targetLang: e.target.value });
-                    }}
-                    disabled={isCapturing}
-                  >
-                    {LANGUAGES.map((l) => (
-                      <option key={l.code} value={l.code}>{l.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="output-section">
-              <div className="output-header">
-                <span className="section-label">
-                  <SpeakerIcon />
-                  Output
-                </span>
-                <button className="refresh-btn" onClick={refreshDevices} title="Refresh devices">
-                  <RefreshIcon />
-                </button>
-              </div>
-              <select
-                className="output-select"
-                value={selectedDevice}
-                onChange={(e) => void handleDeviceChange(e.target.value)}
-                disabled={isCapturing}
-              >
-                <option value="">System Default</option>
-                {canPickOutputDevice && (
-                  <option value={PICK_OUTPUT_OPTION_VALUE}>Choose Output Device…</option>
+                {modes.translate && (
+                  <>
+                    <button className="lang-swap" onClick={handleSwap} disabled={!editable} title="Swap languages" type="button">
+                      <span>⇄</span>
+                    </button>
+                    <div className="lang-group">
+                      <select
+                        className="lang-select"
+                        value={targetLang}
+                        onChange={(e) => {
+                          setTargetLang(e.target.value);
+                          persist({ targetLang: e.target.value });
+                        }}
+                        disabled={!editable}
+                        aria-label="Translate to"
+                      >
+                        {LANGUAGES.map((l) => (
+                          <option key={l.code} value={l.code}>
+                            {l.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
                 )}
-                {outputDevices.map((d) => (
-                  <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
-                ))}
-              </select>
-              {selectedDevice && getSelectedDeviceLabel().toLowerCase().includes("blackhole") && (
-                <div className="device-hint success">BlackHole selected — set Meet mic to BlackHole too</div>
-              )}
-              {!selectedDevice && outputDevices.length > 0 && (
-                <div className="device-hint warning">Select BlackHole to route audio into a call</div>
-              )}
+              </div>
             </div>
 
-            <button
-              className={`action-btn ${isCapturing ? "stop" : "start"}`}
-              onClick={handleToggle}
-            >
-              <span className="btn-content">
-                {isCapturing ? <StopIcon /> : <PlayIcon />}
-                {isCapturing ? "Stop Translation" : "Start Translation"}
-              </span>
+            {providers && (
+              <div className="provider-grid">
+                <ProviderSelect
+                  label="Speech-to-text"
+                  value={sttProvider}
+                  onChange={(v) => {
+                    setSttProvider(v);
+                    persist({ sttProvider: v });
+                  }}
+                  providers={providers.stt.providers}
+                  defaultId={providers.stt.default}
+                  disabled={!editable}
+                />
+                {modes.translate && (
+                  <ProviderSelect
+                    label="Voice (TTS)"
+                    value={ttsProvider}
+                    onChange={(v) => {
+                      setTtsProvider(v);
+                      persist({ ttsProvider: v });
+                    }}
+                    providers={providers.tts.providers}
+                    defaultId={providers.tts.default}
+                    disabled={!editable}
+                  />
+                )}
+              </div>
+            )}
+            {providers && modes.notes && sttInfo && !sttInfo.diarization && (
+              <div className="device-hint warning">{sttInfo.label} doesn't label speakers — try Soniox or Deepgram.</div>
+            )}
+            {providers && modes.translate && !ttsConfigured && (
+              <div className="device-hint warning">No TTS key — you'll get translated text without audio.</div>
+            )}
+            {providers && modes.notes && !llmConfigured && (
+              <div className="device-hint warning">Add a Gemini or Groq key for summaries and chat.</div>
+            )}
+
+            {modes.translate && (
+              <div className="output-section">
+                <div className="output-header">
+                  <span className="section-label">
+                    <SpeakerIcon />
+                    Translated audio output
+                  </span>
+                  <button className="refresh-btn" onClick={refreshDevices} title="Refresh devices" type="button">
+                    <RefreshIcon />
+                  </button>
+                </div>
+                <select
+                  className="output-select"
+                  value={selectedDevice}
+                  onChange={(e) => (e.target.value === PICK_OUTPUT_OPTION_VALUE ? void refreshDevices() : chooseDevice(e.target.value))}
+                  disabled={!editable}
+                >
+                  <option value="">System Default</option>
+                  {canPickOutputDevice && <option value={PICK_OUTPUT_OPTION_VALUE}>Choose Output Device…</option>}
+                  {outputDevices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+                {selectedDeviceLabel.toLowerCase().includes("blackhole") && (
+                  <div className="device-hint success">BlackHole selected — set your call's mic to BlackHole too</div>
+                )}
+              </div>
+            )}
+
+            {isCapturing ? (
+              <button className="action-btn stop" onClick={() => void handleStop()} disabled={busy} type="button">
+                <span className="btn-content">
+                  <StopIcon />
+                  {session?.modes.notes ? "Stop & summarize" : "Stop"}
+                </span>
+              </button>
+            ) : (
+              <button className="action-btn start" onClick={handleStart} disabled={isStarting || !!startBlocker} type="button">
+                <span className="btn-content">
+                  <PlayIcon />
+                  {isStarting ? "Starting…" : startBlocker || "Start"}
+                </span>
+              </button>
+            )}
+
+            <button className="small-btn ghost wide" type="button" onClick={openPanel}>
+              Open notes panel — transcript, summary &amp; chat
             </button>
 
-            <div className="transcript-section">
-              <span className="section-label">
-                <TranscriptIcon />
-                Live Transcript
-              </span>
-              <div className="transcript-box" ref={transcriptRef}>
-                {transcripts.length === 0 && !currentOriginal && (
-                  <div className="transcript-empty">
-                    <WaveformBars active={false} />
-                    <div>Translations will appear here</div>
-                  </div>
-                )}
-                {transcripts.map((t, i) => (
-                  <div key={i} className="transcript-entry">
-                    <div className="transcript-original">{t.original}</div>
-                    <div className="transcript-translated">{t.translated}</div>
-                  </div>
-                ))}
-                {currentOriginal && (
-                  <div className="transcript-entry">
-                    <div className="transcript-original">{currentOriginal}</div>
-                    {currentTranslated && (
-                      <div className="transcript-translated">{currentTranslated}</div>
-                    )}
-                  </div>
-                )}
+            {(isCapturing || lines.length > 0) && (
+              <div className="transcript-section">
+                <span className="section-label">Live preview</span>
+                <div className="transcript-box" ref={transcriptRef}>
+                  {lines.length === 0 && !partial && <div className="transcript-empty">Listening…</div>}
+                  {lines.map((l) => (
+                    <div key={l.key} className="transcript-entry">
+                      {l.text && (
+                        <div className="transcript-original">
+                          <b>{speakerLabel(l.source === "mic" ? "me" : l.speaker)}:</b> {l.text}
+                        </div>
+                      )}
+                      {l.translation && <div className="transcript-translated">{l.translation}</div>}
+                    </div>
+                  ))}
+                  {partial && (
+                    <div className="transcript-entry">
+                      <div className="transcript-original">{partial.text}</div>
+                      {partial.translation && <div className="transcript-translated">{partial.translation}</div>}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
+
+            <a className="footer-link" href={BACKEND_HTTP_URL} target="_blank" rel="noreferrer">
+              API keys &amp; settings ↗
+            </a>
           </>
         ) : (
           <MemoriesTab />

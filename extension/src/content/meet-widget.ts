@@ -1,22 +1,31 @@
 /**
  * Google Meet overlay widget — injected as a content script.
- * Renders a floating translation control panel at the bottom-right of the
- * meeting window using shadow DOM for full style isolation.
+ * Renders a floating control panel at the bottom-right of the meeting window
+ * (shadow DOM for style isolation). It mirrors the service worker's session
+ * state from `target: "ui"` broadcasts and offers quick start/stop, Meet-only
+ * "translate my voice", and a shortcut to the notes side panel.
  */
 
 import { LANGUAGES } from "../utils/languages";
+import { INITIAL_STATE, speakerLabel, type Modes, type SessionState, type Source, type UiMessage } from "../shared/protocol";
 
 const MEETING_PATTERN = /^\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i;
+const MAX_ENTRIES = 6;
 
-type WidgetStatus = "idle" | "connected" | "capturing" | "disconnected" | "error";
+interface Entry {
+  key: number;
+  source: Source;
+  speaker: string | null;
+  orig: string;
+  trans: string;
+  segmentId?: number;
+}
 
-const STATUS_LABELS: Record<WidgetStatus, string> = {
-  idle: "Ready",
-  connected: "Connected",
-  capturing: "Translating live",
-  disconnected: "Disconnected",
-  error: "Error",
-};
+interface PartialLine {
+  speaker: string | null;
+  text: string;
+  translation?: string;
+}
 
 /* ═══════════════════════════════════════════
    CSS (injected into shadow DOM)
@@ -509,6 +518,46 @@ const WIDGET_CSS = `
 .t-source.incoming {
   color: var(--green);
 }
+
+/* ── Notes button + flash line ── */
+.action-btn.notes {
+  background: transparent;
+  color: var(--text2);
+  border: 1px solid var(--glass-border);
+  box-shadow: none;
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+
+.action-btn.notes:hover {
+  color: var(--text);
+  background: var(--glass-2);
+}
+
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.p-flash {
+  margin: 6px 12px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.p-flash.error {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.p-flash[hidden] { display: none; }
+
+.t-source.me { color: var(--amber); }
+.t-partial .t-orig { opacity: 0.75; }
 `;
 
 /* ═══════════════════════════════════════════
@@ -528,6 +577,8 @@ const SVG_MINUS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 const SVG_MIC = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>`;
 
+const SVG_NOTES = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>`;
+
 /* ═══════════════════════════════════════════
    Widget Class
    ═══════════════════════════════════════════ */
@@ -539,32 +590,43 @@ class InterpreterWidget {
   private panel!: HTMLDivElement;
 
   private expanded = false;
-  private status: WidgetStatus = "idle";
-  private isCapturing = false;
+  private state: SessionState = { ...INITIAL_STATE };
+  private modes: Modes = { translate: true, notes: true };
   private sourceLang = "en";
   private targetLang = "es";
 
-  private transcripts: { orig: string; trans: string }[] = [];
-  private currentOrig = "";
-  private currentTrans = "";
-
-  private isMicTranslating = false;
-  private micActionBtn!: HTMLButtonElement;
-  private micStatusDot!: HTMLDivElement;
-  private micStatusLabel!: HTMLSpanElement;
-  private micTranscripts: { orig: string; trans: string }[] = [];
-  private micCurrentOrig = "";
-  private micCurrentTrans = "";
+  private entries: Entry[] = [];
+  private partials: Partial<Record<Source, PartialLine>> = {};
+  private entryCounter = 0;
+  private outgoingError = "";
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
 
   private fabDot!: HTMLDivElement;
   private statusDot!: HTMLDivElement;
   private statusLabel!: HTMLSpanElement;
+  private flashEl!: HTMLDivElement;
   private waveformEl!: HTMLDivElement;
   private sourceSelect!: HTMLSelectElement;
   private targetSelect!: HTMLSelectElement;
   private swapBtn!: HTMLButtonElement;
   private actionBtn!: HTMLButtonElement;
+  private micActionBtn!: HTMLButtonElement;
+  private notesBtn!: HTMLButtonElement;
+  private micStatusDot!: HTMLDivElement;
+  private micStatusLabel!: HTMLSpanElement;
   private transcriptBox!: HTMLDivElement;
+
+  private readonly onRuntimeMessage = (msg: unknown) => {
+    if (msg && typeof msg === "object" && (msg as { target?: string }).target === "ui") this.handleUiMessage(msg as UiMessage);
+  };
+  private readonly onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area !== "sync" || !changes.modes) return;
+    const next = changes.modes.newValue as Modes | undefined;
+    if (next && typeof next.translate === "boolean") {
+      this.modes = next;
+      this.render();
+    }
+  };
 
   constructor() {
     this.host = document.createElement("div");
@@ -579,7 +641,8 @@ class InterpreterWidget {
     document.body.appendChild(this.host);
 
     this.loadSettings();
-    this.listenForMessages();
+    chrome.runtime.onMessage.addListener(this.onRuntimeMessage);
+    chrome.storage.onChanged.addListener(this.onStorageChanged);
     this.syncState();
   }
 
@@ -587,10 +650,8 @@ class InterpreterWidget {
 
   private buildDOM(): void {
     this.anchor = this.el("div", "widget-anchor");
-
     this.buildFab();
     this.buildPanel();
-
     this.anchor.appendChild(this.fab);
     this.shadow.appendChild(this.anchor);
   }
@@ -598,10 +659,8 @@ class InterpreterWidget {
   private buildFab(): void {
     this.fab = this.el("div", "fab");
     this.fab.innerHTML = SVG_GLOBE;
-
     this.fabDot = this.el("div", "fab-dot");
     this.fab.appendChild(this.fabDot);
-
     this.fab.addEventListener("click", () => this.toggleExpand());
   }
 
@@ -616,60 +675,61 @@ class InterpreterWidget {
     const title = this.el("span", "p-title");
     title.textContent = "Distill";
     const subtitle = this.el("div", "p-subtitle");
-    subtitle.textContent = "Live Translation";
+    subtitle.textContent = "Translate · Notes";
     titleWrap.append(title, subtitle);
 
     this.waveformEl = this.el("div", "p-waveform");
     this.waveformEl.innerHTML = SVG_WAVEFORM;
 
-    const minBtn = this.el("button", "p-minimize") as HTMLButtonElement;
+    const minBtn = this.el("button", "p-minimize");
     minBtn.innerHTML = SVG_MINUS;
     minBtn.addEventListener("click", () => this.toggleExpand());
-
     header.append(logo, titleWrap, this.waveformEl, minBtn);
 
     // Status
     const statusRow = this.el("div", "p-status");
     this.statusDot = this.el("div", "s-dot");
-    this.statusLabel = this.el("span") as HTMLSpanElement;
+    this.statusLabel = this.el("span");
     this.statusLabel.textContent = "Ready";
     statusRow.append(this.statusDot, this.statusLabel);
+
+    this.flashEl = this.el("div", "p-flash");
+    this.flashEl.hidden = true;
+
+    // Mic (your voice) status
+    const micStatusRow = this.el("div", "p-mic-status");
+    this.micStatusDot = this.el("div", "s-dot");
+    this.micStatusLabel = this.el("span");
+    micStatusRow.append(this.micStatusDot, this.micStatusLabel);
 
     // Body
     const body = this.el("div", "p-body");
 
-    // Languages
     const langs = this.el("div", "langs");
     this.sourceSelect = this.buildLangSelect(this.sourceLang);
     this.targetSelect = this.buildLangSelect(this.targetLang);
-    this.swapBtn = this.el("button", "swap-btn") as HTMLButtonElement;
+    this.sourceSelect.title = "Language spoken in the meeting";
+    this.targetSelect.title = "Your language";
+    this.swapBtn = this.el("button", "swap-btn");
     this.swapBtn.innerHTML = SVG_SWAP;
     this.swapBtn.addEventListener("click", () => this.swapLangs());
     langs.append(this.sourceSelect, this.swapBtn, this.targetSelect);
 
-    // Action button
-    this.actionBtn = this.el("button", "action-btn start") as HTMLButtonElement;
-    this.actionBtn.innerHTML = `${SVG_PLAY}<span>Start Translation</span>`;
+    this.actionBtn = this.el("button", "action-btn start");
     this.actionBtn.addEventListener("click", () => this.toggleCapture());
 
-    // Mic translation button
-    this.micActionBtn = this.el("button", "action-btn mic-start") as HTMLButtonElement;
-    this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
+    this.micActionBtn = this.el("button", "action-btn mic-start");
     this.micActionBtn.addEventListener("click", () => this.toggleMicTranslation());
 
-    // Transcript
+    this.notesBtn = this.el("button", "action-btn notes");
+    this.notesBtn.innerHTML = `${SVG_NOTES}<span>Open notes panel</span>`;
+    this.notesBtn.addEventListener("click", () => this.openNotesPanel());
+
     this.transcriptBox = this.el("div", "transcript");
-    this.transcriptBox.innerHTML = `<div class="t-empty">Translations will appear here</div>`;
 
-    // Mic status
-    const micStatusRow = this.el("div", "p-mic-status");
-    this.micStatusDot = this.el("div", "s-dot") as HTMLDivElement;
-    this.micStatusLabel = this.el("span") as HTMLSpanElement;
-    this.micStatusLabel.textContent = "";
-    micStatusRow.append(this.micStatusDot, this.micStatusLabel);
-
-    body.append(langs, this.actionBtn, this.micActionBtn, this.transcriptBox);
-    this.panel.append(header, statusRow, micStatusRow, body);
+    body.append(langs, this.actionBtn, this.micActionBtn, this.notesBtn, this.transcriptBox);
+    this.panel.append(header, statusRow, this.flashEl, micStatusRow, body);
+    this.render();
   }
 
   private buildLangSelect(selected: string): HTMLSelectElement {
@@ -681,6 +741,11 @@ class InterpreterWidget {
       if (lang.code === selected) opt.selected = true;
       sel.appendChild(opt);
     }
+    sel.addEventListener("change", () => {
+      this.sourceLang = this.sourceSelect.value;
+      this.targetLang = this.targetSelect.value;
+      chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
+    });
     return sel;
   }
 
@@ -697,8 +762,6 @@ class InterpreterWidget {
     }
   }
 
-  /* ── Language Swap ── */
-
   private swapLangs(): void {
     const tmp = this.sourceSelect.value;
     this.sourceSelect.value = this.targetSelect.value;
@@ -708,234 +771,266 @@ class InterpreterWidget {
     chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
   }
 
+  /* ── Messaging helpers ── */
+
+  /** sendMessage that survives an invalidated extension context (extension reloaded). */
+  private send(
+    message: Record<string, unknown>,
+    onResponse?: (res: { success?: boolean; error?: string; state?: SessionState } | undefined) => void
+  ): void {
+    try {
+      chrome.runtime.sendMessage(message, (res) => {
+        const err = chrome.runtime.lastError;
+        // Every command response carries the latest state — apply it in case a
+        // broadcast to this tab was missed.
+        if (!err && res?.state) {
+          this.state = res.state;
+          this.render();
+        }
+        if (onResponse) onResponse(err ? { success: false, error: err.message } : res);
+      });
+    } catch {
+      this.flash("Distill was updated — reload this Meet tab.", true);
+    }
+  }
+
+  private friendlyError(message: string): string {
+    if (/invoked|activeTab|permission|Chrome pages/i.test(message)) {
+      return `${message} — click the Distill toolbar icon on this tab and press Start there.`;
+    }
+    return message;
+  }
+
   /* ── Start / Stop ── */
 
   private toggleCapture(): void {
-    if (this.isCapturing) {
-      chrome.runtime.sendMessage({ type: "stop-capture", target: "background" });
-    } else {
-      this.sourceLang = this.sourceSelect.value;
-      this.targetLang = this.targetSelect.value;
-      chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
-      chrome.runtime.sendMessage(
+    if (this.state.isCapturing) {
+      this.send({ type: "stop-capture", target: "background", endMeeting: true }, () => this.syncState());
+      return;
+    }
+    this.sourceLang = this.sourceSelect.value;
+    this.targetLang = this.targetSelect.value;
+    chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
+    chrome.storage.sync.get(["modes", "includeMic", "sttProvider", "ttsProvider"], (d) => {
+      const modes: Modes = d.modes && typeof d.modes.translate === "boolean" ? d.modes : this.modes;
+      this.entries = [];
+      this.partials = {};
+      this.renderTranscript();
+      this.send(
         {
           type: "start-capture",
           target: "background",
           sourceLang: this.sourceLang,
           targetLang: this.targetLang,
+          modes,
+          includeMic: !!d.includeMic && modes.notes,
+          sttProvider: d.sttProvider || null,
+          ttsProvider: modes.translate ? d.ttsProvider || null : null,
         },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            this.setStatus("error", chrome.runtime.lastError.message);
-            return;
-          }
-          if (response && !response.success) {
-            this.setStatus("error", response.error || "Failed to start capture");
+        (res) => {
+          if (res && res.success === false) {
+            this.flash(this.friendlyError(res.error || "Failed to start capture"), true);
+            this.syncState();
           }
         }
       );
-    }
+    });
   }
-
-  /* ── Mic Start / Stop ── */
 
   private toggleMicTranslation(): void {
-    if (this.isMicTranslating) {
-      chrome.runtime.sendMessage({
-        type: "stop-mic-translation",
-        target: "background",
-      });
-    } else {
-      this.sourceLang = this.sourceSelect.value;
-      this.targetLang = this.targetSelect.value;
-      chrome.runtime.sendMessage(
-        {
-          type: "start-mic-translation",
-          target: "background",
-          sourceLang: this.sourceLang,
-          targetLang: this.targetLang,
-        },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            this.setMicStatus("error", chrome.runtime.lastError.message);
-            return;
-          }
-          if (response && !response.success) {
-            this.setMicStatus("error", response.error || "Failed to start mic translation");
+    if (this.state.isMicTranslating) {
+      this.send({ type: "stop-mic-translation", target: "background" }, () => this.syncState());
+      return;
+    }
+    this.outgoingError = "";
+    this.sourceLang = this.sourceSelect.value;
+    this.targetLang = this.targetSelect.value;
+    this.send(
+      { type: "start-mic-translation", target: "background", sourceLang: this.sourceLang, targetLang: this.targetLang },
+      (res) => {
+        if (res && res.success === false) {
+          this.outgoingError = res.error || "Failed to start voice translation";
+          this.render();
+          this.syncState();
+        }
+      }
+    );
+  }
+
+  private openNotesPanel(): void {
+    // The service worker opens the panel synchronously inside this click's gesture.
+    this.send({ type: "open-side-panel", target: "background" }, (res) => {
+      if (res && res.success === false) this.flash("Click the Distill toolbar icon → Open notes panel.", false);
+    });
+  }
+
+  /* ── State + rendering ── */
+
+  private handleUiMessage(msg: UiMessage): void {
+    switch (msg.type) {
+      case "state":
+        this.state = msg.state;
+        this.render();
+        return;
+      case "transcript": {
+        if (!msg.isFinal) {
+          this.partials[msg.source] = { speaker: msg.speaker, text: msg.text };
+        } else {
+          this.partials[msg.source] = undefined;
+          if (!msg.segmentId || !this.entries.some((e) => e.segmentId === msg.segmentId)) {
+            this.entries.push({ key: ++this.entryCounter, source: msg.source, speaker: msg.speaker, orig: msg.text, trans: "", segmentId: msg.segmentId });
+            this.entries = this.entries.slice(-MAX_ENTRIES * 3);
           }
         }
-      );
+        this.renderTranscript();
+        return;
+      }
+      case "translation": {
+        if (!msg.isFinal) {
+          const p = this.partials[msg.source];
+          if (p) p.translation = msg.text;
+        } else {
+          let target = msg.segmentId ? this.entries.find((e) => e.segmentId === msg.segmentId) : undefined;
+          if (!target) {
+            for (let i = this.entries.length - 1; i >= 0; i--) {
+              if (this.entries[i].source === msg.source && !this.entries[i].trans) {
+                target = this.entries[i];
+                break;
+              }
+            }
+          }
+          if (target) target.trans = msg.text;
+          else this.entries.push({ key: ++this.entryCounter, source: msg.source, speaker: msg.speaker, orig: "", trans: msg.text });
+        }
+        this.renderTranscript();
+        return;
+      }
+      case "error":
+        if (msg.channel === "outgoing") {
+          this.outgoingError = msg.message;
+          this.render();
+        } else {
+          this.flash(this.friendlyError(msg.message), true);
+        }
+        return;
+      case "warning":
+        this.flash(msg.message, false);
+        return;
+      case "meeting-ended":
+        this.flash("Meeting saved — open the notes panel for the summary.", false);
+        return;
     }
   }
 
-  /* ── Mic Status Updates ── */
-
-  private setMicStatus(s: "idle" | "translating" | "error", errorMsg?: string): void {
-    this.isMicTranslating = s === "translating";
-
-    this.micStatusDot.className = `s-dot${s === "translating" ? " capturing" : s === "error" ? " error" : ""}`;
-
-    if (s === "translating") {
-      this.micStatusLabel.textContent = "Your voice is being translated";
-      this.micActionBtn.className = "action-btn mic-stop";
-      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Stop My Voice</span>`;
-    } else if (s === "error") {
-      this.micStatusLabel.textContent = errorMsg || "Mic error";
-      this.micActionBtn.className = "action-btn mic-start";
-      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
-    } else {
-      this.micStatusLabel.textContent = "";
-      this.micActionBtn.className = "action-btn mic-start";
-      this.micActionBtn.innerHTML = `${SVG_MIC}<span>Translate My Voice</span>`;
-    }
-
-    // Disable language selectors only if EITHER direction is active
-    const anyActive = this.isCapturing || this.isMicTranslating;
-    this.sourceSelect.disabled = anyActive;
-    this.targetSelect.disabled = anyActive;
-    this.swapBtn.disabled = anyActive;
+  private flash(text: string, isError: boolean): void {
+    this.flashEl.textContent = text;
+    this.flashEl.className = `p-flash${isError ? " error" : ""}`;
+    this.flashEl.hidden = false;
+    if (this.flashTimer) clearTimeout(this.flashTimer);
+    this.flashTimer = setTimeout(() => (this.flashEl.hidden = true), isError ? 10000 : 6000);
   }
 
-  /* ── Status Updates ── */
+  private render(): void {
+    const s = this.state;
+    const dot =
+      s.status === "capturing" ? "capturing" : s.status === "error" ? "error" : s.status === "connecting" || s.status === "reconnecting" ? "connected" : "idle";
+    this.fabDot.className = `fab-dot ${dot}`;
+    this.statusDot.className = `s-dot ${dot}`;
 
-  private setStatus(s: WidgetStatus, errorMsg?: string): void {
-    this.status = s;
-    this.isCapturing = s === "capturing";
+    const activeModes = s.isCapturing ? s.modes : this.modes;
+    const what = activeModes.translate && activeModes.notes ? "translation + notes" : activeModes.translate ? "translation" : "notes";
+    this.statusLabel.textContent =
+      s.status === "connecting"
+        ? "Connecting…"
+        : s.status === "reconnecting"
+          ? "Reconnecting…"
+          : s.status === "capturing"
+            ? activeModes.translate && activeModes.notes
+              ? "Translating & taking notes"
+              : activeModes.translate
+                ? "Translating live"
+                : "Taking notes"
+            : s.status === "error"
+              ? s.lastError || "Error"
+              : "Ready";
 
-    this.fabDot.className = `fab-dot ${s}`;
-    this.statusDot.className = `s-dot ${s}`;
-    this.statusLabel.textContent = s === "error" ? (errorMsg || "Error") : STATUS_LABELS[s];
+    this.waveformEl.className = `p-waveform${s.isCapturing ? " active" : ""}`;
+    this.waveformEl.querySelector(".wf")?.classList.toggle("active", s.isCapturing);
 
-    this.waveformEl.className = `p-waveform${this.isCapturing ? " active" : ""}`;
-    const wfSvg = this.waveformEl.querySelector(".wf");
-    if (wfSvg) {
-      wfSvg.classList.toggle("active", this.isCapturing);
-    }
+    const busy = s.isCapturing || s.isMicTranslating || s.status === "connecting";
+    this.sourceSelect.disabled = busy;
+    this.targetSelect.disabled = busy;
+    this.swapBtn.disabled = busy;
 
-    const anyActive = this.isCapturing || this.isMicTranslating;
-    this.sourceSelect.disabled = anyActive;
-    this.targetSelect.disabled = anyActive;
-    this.swapBtn.disabled = anyActive;
-
-    if (this.isCapturing) {
+    if (s.isCapturing) {
       this.actionBtn.className = "action-btn stop";
-      this.actionBtn.innerHTML = `${SVG_STOP}<span>Stop Translation</span>`;
+      this.actionBtn.innerHTML = `${SVG_STOP}<span>${s.modes.notes ? "Stop & summarize" : "Stop"}</span>`;
+      this.actionBtn.disabled = false;
     } else {
       this.actionBtn.className = "action-btn start";
-      this.actionBtn.innerHTML = `${SVG_PLAY}<span>Start Translation</span>`;
+      this.actionBtn.innerHTML = `${SVG_PLAY}<span>${s.status === "connecting" ? "Starting…" : `Start ${what}`}</span>`;
+      this.actionBtn.disabled = s.status === "connecting";
     }
-  }
 
-  /* ── Transcript Rendering ── */
+    // Your voice → the other participants (Meet only)
+    const o = s.outgoingStatus;
+    this.micStatusDot.className = `s-dot${o === "on" ? " capturing" : o === "starting" ? " connected" : o === "error" ? " error" : ""}`;
+    this.micStatusLabel.textContent =
+      o === "on"
+        ? "Others hear you translated"
+        : o === "starting"
+          ? "Connecting your voice…"
+          : o === "error"
+            ? this.outgoingError || "Voice translation failed"
+            : this.outgoingError;
+    this.micActionBtn.className = s.isMicTranslating ? "action-btn mic-stop" : "action-btn mic-start";
+    this.micActionBtn.innerHTML = `${SVG_MIC}<span>${s.isMicTranslating ? "Stop translating my voice" : "Translate my voice"}</span>`;
+    this.micActionBtn.title = "Speak in your language; other participants hear the meeting language.";
+
+    this.renderTranscript();
+  }
 
   private renderTranscript(): void {
     const box = this.transcriptBox;
-    const hasIncoming = this.transcripts.length > 0 || !!this.currentOrig;
-    const hasOutgoing = this.micTranscripts.length > 0 || !!this.micCurrentOrig;
-
-    if (!hasIncoming && !hasOutgoing) {
-      box.innerHTML = `<div class="t-empty">Translations will appear here</div>`;
+    const partials = (Object.entries(this.partials) as [Source, PartialLine | undefined][]).filter(
+      (e): e is [Source, PartialLine] => !!e[1]?.text
+    );
+    if (this.entries.length === 0 && partials.length === 0) {
+      box.innerHTML = `<div class="t-empty">${this.state.isCapturing ? "Listening…" : "Live transcript and translations appear here"}</div>`;
       return;
     }
 
+    const who = (source: Source, speaker: string | null) => (source === "mic" ? "me" : speaker);
     let html = "";
-
-    // Show incoming transcripts
-    const recentIncoming = this.transcripts.slice(-3);
-    for (const t of recentIncoming) {
-      html += `<div class="t-entry"><div class="t-source incoming">THEM</div><div class="t-orig">${this.esc(t.orig)}</div><div class="t-trans">${this.esc(t.trans)}</div></div>`;
-    }
-    if (this.currentOrig) {
-      html += `<div class="t-entry"><div class="t-source incoming">THEM</div><div class="t-orig">${this.esc(this.currentOrig)}</div>`;
-      if (this.currentTrans) html += `<div class="t-trans">${this.esc(this.currentTrans)}</div>`;
+    for (const e of this.entries.slice(-MAX_ENTRIES)) {
+      const spk = who(e.source, e.speaker);
+      html += `<div class="t-entry"><div class="t-source ${spk === "me" ? "me" : "incoming"}">${this.esc(speakerLabel(spk))}</div>`;
+      if (e.orig) html += `<div class="t-orig">${this.esc(e.orig)}</div>`;
+      if (e.trans) html += `<div class="t-trans">${this.esc(e.trans)}</div>`;
       html += `</div>`;
     }
-
-    // Show outgoing transcripts
-    const recentOutgoing = this.micTranscripts.slice(-3);
-    for (const t of recentOutgoing) {
-      html += `<div class="t-entry"><div class="t-source">YOU</div><div class="t-orig">${this.esc(t.orig)}</div><div class="t-trans">${this.esc(t.trans)}</div></div>`;
-    }
-    if (this.micCurrentOrig) {
-      html += `<div class="t-entry"><div class="t-source">YOU</div><div class="t-orig">${this.esc(this.micCurrentOrig)}</div>`;
-      if (this.micCurrentTrans) html += `<div class="t-trans">${this.esc(this.micCurrentTrans)}</div>`;
+    for (const [source, p] of partials) {
+      const spk = who(source, p.speaker);
+      html += `<div class="t-entry t-partial"><div class="t-source ${spk === "me" ? "me" : "incoming"}">${this.esc(speakerLabel(spk))}</div><div class="t-orig">${this.esc(p.text)}</div>`;
+      if (p.translation) html += `<div class="t-trans">${this.esc(p.translation)}</div>`;
       html += `</div>`;
     }
-
     box.innerHTML = html;
     box.scrollTop = box.scrollHeight;
   }
 
-  /* ── Chrome Messaging ── */
-
-  private listenForMessages(): void {
-    chrome.runtime.onMessage.addListener((msg: any) => {
-      if (msg.target !== "popup") return;
-
-      switch (msg.type) {
-        case "status":
-          this.setStatus(msg.status as WidgetStatus);
-          break;
-        case "transcript":
-          if (msg.isFinal) {
-            this.currentOrig = (this.currentOrig + " " + msg.text).trim();
-          } else {
-            this.currentOrig = msg.text;
-          }
-          this.renderTranscript();
-          break;
-        case "translated-text":
-          this.transcripts.push({ orig: this.currentOrig, trans: msg.text });
-          this.currentOrig = "";
-          this.currentTrans = "";
-          this.renderTranscript();
-          break;
-        case "translated-text-partial":
-          this.currentTrans = msg.text;
-          this.renderTranscript();
-          break;
-        case "error":
-          this.setStatus("error", msg.message);
-          break;
-        case "mic-status":
-          this.setMicStatus(msg.status as "idle" | "translating" | "error");
-          break;
-        case "mic-transcript":
-          if (msg.isFinal) {
-            this.micCurrentOrig = (this.micCurrentOrig + " " + msg.text).trim();
-          } else {
-            this.micCurrentOrig = msg.text;
-          }
-          this.renderTranscript();
-          break;
-        case "mic-translated-text":
-          this.micTranscripts.push({ orig: this.micCurrentOrig, trans: msg.text });
-          this.micCurrentOrig = "";
-          this.micCurrentTrans = "";
-          this.renderTranscript();
-          break;
-        case "mic-translated-text-partial":
-          this.micCurrentTrans = msg.text;
-          this.renderTranscript();
-          break;
-      }
-    });
-  }
-
   private syncState(): void {
-    chrome.runtime.sendMessage({ type: "get-state", target: "background" }, (res) => {
-      if (chrome.runtime.lastError) return;
-      if (res?.isCapturing) {
-        this.setStatus("capturing");
-      }
-      if (res?.isMicTranslating) {
-        this.setMicStatus("translating");
+    this.send({ type: "get-state", target: "background" }, (res) => {
+      const state = (res as { state?: SessionState } | undefined)?.state;
+      if (state) {
+        this.state = state;
+        this.render();
       }
     });
   }
 
   private loadSettings(): void {
-    chrome.storage.sync.get(["sourceLang", "targetLang"], (data) => {
+    chrome.storage.sync.get(["sourceLang", "targetLang", "modes"], (data) => {
       if (data.sourceLang) {
         this.sourceLang = data.sourceLang;
         this.sourceSelect.value = data.sourceLang;
@@ -944,15 +1039,14 @@ class InterpreterWidget {
         this.targetLang = data.targetLang;
         this.targetSelect.value = data.targetLang;
       }
+      if (data.modes && typeof data.modes.translate === "boolean") this.modes = data.modes;
+      this.render();
     });
   }
 
   /* ── Helpers ── */
 
-  private el<K extends keyof HTMLElementTagNameMap>(
-    tag: K,
-    className?: string
-  ): HTMLElementTagNameMap[K] {
+  private el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
     const e = document.createElement(tag);
     if (className) e.className = className;
     return e;
@@ -965,6 +1059,9 @@ class InterpreterWidget {
   }
 
   destroy(): void {
+    chrome.runtime.onMessage.removeListener(this.onRuntimeMessage);
+    chrome.storage.onChanged.removeListener(this.onStorageChanged);
+    if (this.flashTimer) clearTimeout(this.flashTimer);
     this.host.remove();
   }
 }
@@ -987,6 +1084,7 @@ function maybeActivate(): void {
 
 maybeActivate();
 
+// Meet is a single-page app: watch for URL changes (joining / leaving a call).
 let lastHref = location.href;
 const observer = new MutationObserver(() => {
   if (location.href !== lastHref) {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Distill — Live Translation",
-  "description": "Real-time speaker translation for web chat apps. Hear everything in your native tongue.",
+  "name": "Distill — Live Translation & Meeting Notes",
+  "description": "Live translation, transcription, AI summaries and chat for Google Meet, Teams, Zoom web and any tab.",
   "version": "1.0.0",
   "icons": {
     "16": "public/icon16.png",
@@ -17,6 +17,9 @@
       "128": "public/icon128.png"
     }
   },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
   "background": {
     "service_worker": "src/background.ts",
     "type": "module"
@@ -26,23 +29,36 @@
     "offscreen",
     "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "sidePanel"
   ],
   "content_scripts": [
     {
-      "matches": ["https://meet.google.com/*"],
-      "js": ["src/content/meet-interceptor.ts"],
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "src/content/meet-interceptor.ts"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://meet.google.com/*"],
-      "js": ["src/content/meet-bridge.ts"],
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "src/content/meet-bridge.ts"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://meet.google.com/*"],
-      "js": ["src/content/meet-widget.ts"],
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "src/content/meet-widget.ts"
+      ],
       "run_at": "document_idle"
     }
   ]

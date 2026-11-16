@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Distill — microphone access</title>
+    <style>
+      body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f2f2f7; color: #1c1c1e; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+      @media (prefers-color-scheme: dark) { body { background: #1c1c1e; color: #f2f2f7; } .card { background: #2c2c2e !important; } }
+      .card { background: #fff; border-radius: 16px; padding: 28px 32px; max-width: 440px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); }
+      h1 { font-size: 20px; margin: 0 0 8px; }
+      p { line-height: 1.55; margin: 0 0 16px; opacity: 0.8; }
+      button { border: none; border-radius: 999px; padding: 11px 20px; font-size: 14px; font-weight: 600; background: #007aff; color: #fff; cursor: pointer; }
+      #status { margin-top: 14px; font-weight: 600; }
+      .ok { color: #30a14e; } .err { color: #d70015; }
+    </style>
+    <script type="module" crossorigin src="../../assets/permissions-CoCqsZS-.js"></script>
+    <link rel="modulepreload" crossorigin href="../../assets/modulepreload-polyfill-B5Qt9EMX.js">
+  </head>
+  <body>
+    <div class="card">
+      <h1>Allow Distill to hear your microphone</h1>
+      <p>So your own voice shows up in the meeting transcript and summary. Chrome asks once; the permission covers Distill's background capture too. Audio goes only to your local Distill backend.</p>
+      <button id="allow" type="button">Allow microphone</button>
+      <div id="status" role="status"></div>
+    </div>
+  </body>
+</html>
