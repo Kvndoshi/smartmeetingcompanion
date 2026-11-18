@@ -80,8 +80,8 @@ Then open `chrome://extensions` (or `edge://extensions`), turn on **Developer mo
 1. Open your meeting tab and click the Distill toolbar icon.
 2. Set **My language**: the language you speak and want to hear.
 3. Turn on what you want. Each direction has its own colour-coded card:
-   - 🎧 **What I hear** (blue): everyone else, translated into My language. **They speak** is **Auto-detect** by default, so each speaker's language is detected on the fly. Anyone already speaking your language is heard as-is, not translated. **Keep original voices quietly underneath** leaves the real voices at low volume under the translation; untick it to mute them.
-   - 🎤 **What they hear** (purple, Google Meet only): your voice, translated for everyone in the call. Pick **Others hear me in**, or **Auto — match the room**, then press **Translate my voice**. This card has its own button, independent of Start. You can change the language while it runs. See [Two-way and multi-language calls](#two-way-and-multi-language-calls).
+   - 🎧 **What I hear** (blue): everyone else, translated into My language. **They speak** is **Auto-detect** by default, so each speaker's language is detected on the fly. You hear only the translated voice: the original voices are silent. Anyone already speaking your language is not translated, just read back in the same voice so nobody goes missing. Tick **Keep original voices quietly underneath** (off by default) to leave the real voices at low volume under the translation.
+   - 🎤 **What they hear** (purple, Google Meet only): your voice, translated for everyone in the call. Pick **Others hear me in**, then press **Translate my voice**. **Auto — match the room** needs **What I hear** running in the same call (or a fixed **They speak** language); until Distill has heard which language the room speaks, the status says it is *not translating yet* and the others hear your own voice. This card has its own button, independent of Start. You can change the language while it runs. See [Two-way and multi-language calls](#two-way-and-multi-language-calls).
    - 📝 **Take notes** (green): get the transcript, summary and chat. Notes contain everything said in the meeting:
      - The other participants come from the tab audio.
      - You come from your microphone. **Include my microphone** is on by default, because the meeting tab never plays your own voice back.
@@ -98,9 +98,10 @@ Then open `chrome://extensions` (or `edge://extensions`), turn on **Developer mo
 On Google Meet, a floating widget shows the same three groups in compact form: My language, **What I hear** (with Start/Stop), **What they hear** (with **Translate my voice**), plus **Open notes panel**. Chrome only allows tab capture after you've clicked the toolbar icon on that tab, so if Start fails from the widget, start from the popup once.
 
 **Audio routing.** Translated audio plays through the output device selected in the popup. The original meeting audio plays through the system default output. To feed translated audio into another app, use a virtual device such as BlackHole or VB-Cable.
-- With a fixed **They speak** language, the original voices are kept quiet (about 15%) or muted.
-- With **Auto-detect**, the original stays at full volume and drops while someone speaks another language, so people who already speak your language sound normal.
-- The original always drops while a translation is playing. In notes-only mode, or when no TTS voice is available, it stays at full volume.
+- While **What I hear** is on and a translated voice is available, the original voices are silent from the first word: you hear only the translated voice. This is the same with a fixed **They speak** language and with **Auto-detect**.
+- With **Auto-detect**, speech that is already in your language is read back by the same voice (not translated), a moment after it was said.
+- **Keep original voices quietly underneath** (off by default) plays the originals at about 15% instead of silencing them.
+- In notes-only mode, or when no translated voice is available (no TTS key or no translator), the meeting plays at full volume.
 
 ## Two-way and multi-language calls
 

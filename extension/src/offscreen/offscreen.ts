@@ -11,12 +11,10 @@ let sourceNode: MediaStreamAudioSourceNode | null = null;
 let processorNode: AudioWorkletNode | null = null;
 let processorMonitorGain: GainNode | null = null;
 // The meeting's own audio. tabCapture mutes the tab, so we play it back through
-// this gain: 1 = as usual, lower = "quietly underneath" the translation.
+// this gain: 1 = as usual (notes only), 0 = silent (you hear only the translated
+// voice), in between = "quietly underneath". The service worker picks the level.
 let tabGain: GainNode | null = null;
-let originalLevel = 1; // chosen by the service worker (language-aware)
-let duckLevel = 0.15; // used while translated speech plays
-let ttsPlaying = false;
-let ttsReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+let originalLevel = 1;
 let playbackContext: AudioContext | null = null;
 let playbackElement: HTMLAudioElement | null = null;
 let playbackGeneration = 0;
@@ -158,8 +156,7 @@ function setOutputDevice(deviceId: string): void {
 async function startCapture(
   streamId: string,
   initialOutputDeviceId: string | null,
-  level: number,
-  duck: number
+  level: number
 ): Promise<{ success: boolean; error?: string }> {
   try {
     stopCapture();
@@ -177,13 +174,12 @@ async function startCapture(
     audioContext = new AudioContext({ sampleRate: 48000 });
     sourceNode = audioContext.createMediaStreamSource(mediaStream);
 
-    // tabCapture mutes the tab for the user; play the meeting back through a gain
-    // so voices can sit quietly under their translation (or at full volume when
-    // someone already speaks your language, or in notes-only mode).
+    // tabCapture mutes the tab for the user; play the meeting back through a gain:
+    // silent (or quietly underneath) while a translated voice replaces it, full
+    // volume in notes-only mode or when no translated voice is available.
     tabGain = audioContext.createGain();
     originalLevel = clampLevel(level);
-    duckLevel = clampLevel(duck);
-    tabGain.gain.value = effectiveOriginalLevel();
+    tabGain.gain.value = originalLevel;
     sourceNode.connect(tabGain);
     tabGain.connect(audioContext.destination);
 
@@ -229,41 +225,13 @@ function clampLevel(level: number): number {
   return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 1;
 }
 
-function effectiveOriginalLevel(): number {
-  return ttsPlaying ? Math.min(originalLevel, duckLevel) : originalLevel;
-}
-
-/** Glide to the current level: quick duck, slower release (no clicks, no pumping). */
-function applyOriginalLevel(): void {
+/** Glide to the new level: quick when lowering, slower when raising (no clicks). */
+function setOriginalLevel(level: number): void {
+  originalLevel = clampLevel(level);
   if (!audioContext || !tabGain) return;
-  const target = effectiveOriginalLevel();
   const now = audioContext.currentTime;
   tabGain.gain.cancelScheduledValues(now);
-  tabGain.gain.setTargetAtTime(target, now, target < tabGain.gain.value ? 0.06 : 0.25);
-}
-
-function setOriginalLevel(level: number, duck: number): void {
-  originalLevel = clampLevel(level);
-  duckLevel = clampLevel(duck);
-  applyOriginalLevel();
-}
-
-function setTtsPlaying(playing: boolean): void {
-  if (ttsReleaseTimer) clearTimeout(ttsReleaseTimer);
-  ttsReleaseTimer = null;
-  if (playing) {
-    if (!ttsPlaying) {
-      ttsPlaying = true;
-      applyOriginalLevel();
-    }
-    return;
-  }
-  // Hold the duck briefly: the next translated chunk often follows right away.
-  ttsReleaseTimer = setTimeout(() => {
-    ttsReleaseTimer = null;
-    ttsPlaying = false;
-    applyOriginalLevel();
-  }, 600);
+  tabGain.gain.setTargetAtTime(originalLevel, now, originalLevel < tabGain.gain.value ? 0.06 : 0.25);
 }
 
 function stopCapture(): void {
@@ -459,13 +427,9 @@ let playbackBusy = false;
 async function playNextInQueue(): Promise<void> {
   if (playbackBusy) return;
   const bytes = playbackQueue.shift();
-  if (!bytes) {
-    setTtsPlaying(false);
-    return;
-  }
+  if (!bytes) return;
 
   playbackBusy = true;
-  setTtsPlaying(true);
   const generation = ++playbackGeneration;
   const element = getPlaybackElement();
   const onDone = () => {
@@ -509,7 +473,6 @@ function stopPlayback(): void {
   playbackGeneration++;
   stopPlaybackElement();
   playbackBusy = false;
-  setTtsPlaying(false);
 }
 
 // ── Message Listener ──
@@ -518,7 +481,7 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
 
   switch (message.type) {
     case "start-capture":
-      void startCapture(message.streamId, message.outputDeviceId, message.originalLevel, message.duckLevel).then(sendResponse);
+      void startCapture(message.streamId, message.outputDeviceId, message.originalLevel).then(sendResponse);
       return true;
     case "stop-capture":
       stopCapture();
@@ -534,7 +497,7 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
       sendResponse({ success: true });
       return false;
     case "set-original-level":
-      setOriginalLevel(message.level, message.duckLevel);
+      setOriginalLevel(message.level);
       sendResponse({ success: true });
       return false;
     case "translated-audio":

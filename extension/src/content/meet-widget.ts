@@ -258,6 +258,8 @@ const WIDGET_CSS = `
 }
 
 .s-dot.connected { background: var(--green); }
+.s-dot.waiting { background: var(--amber); }
+.s-dot.waiting::after { background: var(--amber-dim); }
 .s-dot.connected::after { background: var(--green-dim); }
 .s-dot.error, .s-dot.disconnected { background: var(--red); }
 .s-dot.error::after, .s-dot.disconnected::after { background: var(--red-dim); }
@@ -909,7 +911,7 @@ class InterpreterWidget {
           includeMic: d.includeMic !== false && modes.notes, // on unless turned off in the popup
           sttProvider: d.sttProvider || null,
           ttsProvider: modes.translate ? d.ttsProvider || null : null,
-          originalAudio: d.originalAudio === "muted" ? "muted" : "quiet",
+          originalAudio: d.originalAudio === "quiet" ? "quiet" : "muted", // only the translated voice unless opted in
         },
         (res) => {
           if (res && res.success === false) {
@@ -930,7 +932,7 @@ class InterpreterWidget {
     this.myLang = this.myLangSelect.value;
     this.speakLang = this.speakSelect.value;
     this.send(
-      { type: "start-mic-translation", target: "background", myLang: this.myLang, speakLang: this.speakLang },
+      { type: "start-mic-translation", target: "background", myLang: this.myLang, speakLang: this.speakLang, roomHint: this.sourceSelect.value },
       (res) => {
         if (res && res.success === false) {
           this.outgoingError = res.error || "Failed to start voice translation";
@@ -1064,12 +1066,14 @@ class InterpreterWidget {
       voiceText = s.outgoingLang
         ? `Others hear you in ${langName(s.outgoingLang)}`
         : s.speakLang === AUTO && !s.isCapturing
-          ? "Others hear your own voice — start “What I hear” so Distill learns the room's language"
+          ? "Not translating — others hear your own voice. Pick a language above, or start “What I hear” so Distill learns the room's language."
           : s.speakLang === AUTO
-            ? `Others hear your own voice — the room speaks ${langName(this.myLang)} or hasn't said enough yet`
-            : "Others hear your own voice";
+            ? `Not translating yet — others hear your own voice until the room has spoken another language than ${langName(this.myLang)}. Pick a language above to translate right away.`
+            : "Not translating — others hear your own voice";
     }
-    this.micStatusDot.className = `s-dot${o === "on" ? " capturing" : o === "starting" ? " connected" : o === "error" ? " error" : ""}`;
+    // On but not translating (own voice) is its own state, never the "translating" dot.
+    const voiceDot = o === "on" ? (s.outgoingLang ? " capturing" : " waiting") : o === "starting" ? " connected" : o === "error" ? " error" : "";
+    this.micStatusDot.className = `s-dot${voiceDot}`;
     this.micStatusLabel.textContent = voiceText;
     this.micStatusRow.classList.toggle("hidden", !voiceText);
     this.micHint.hidden = s.isMicTranslating;

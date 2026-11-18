@@ -75,7 +75,11 @@ export interface Modes {
   notes: boolean;
 }
 
-/** What happens to the other participants' own voices while their translation plays. */
+/**
+ * The other participants' own voices while "What I hear" translates:
+ * "muted" (default) = you hear only the translated voice, "quiet" = the
+ * originals stay quietly underneath it.
+ */
 export type OriginalAudio = "quiet" | "muted";
 
 export interface SessionState {
@@ -129,7 +133,7 @@ export const INITIAL_STATE: SessionState = {
   speakLang: "auto",
   outgoingLang: null,
   roomLang: null,
-  originalAudio: "quiet",
+  originalAudio: "muted",
   sttProvider: null,
   ttsProvider: null,
   activeProviders: { stt: null, tts: null, translator: null, diarization: false },
@@ -189,7 +193,8 @@ export type BackgroundRequest =
   | { type: "get-state"; target: "background" }
   | { type: "set-output-device"; target: "background"; deviceId: string }
   // "What they hear": I speak `myLang`; others hear `speakLang` ("auto" = match the room).
-  | { type: "start-mic-translation"; target: "background"; myLang: string; speakLang: string; tabId?: number }
+  // `roomHint` = the UI's "They speak" choice: what "auto" uses while capture isn't running.
+  | { type: "start-mic-translation"; target: "background"; myLang: string; speakLang: string; roomHint?: string; tabId?: number }
   | { type: "set-speak-language"; target: "background"; speakLang: string }
   | { type: "stop-mic-translation"; target: "background" }
   | { type: "open-side-panel"; target: "background" }
@@ -197,6 +202,8 @@ export type BackgroundRequest =
   | { type: "mic-audio-data"; target: "background"; data: number[] }
   | { type: "offscreen-error"; target: "background"; channel: "capture" | "mic"; message: string; fatal?: boolean }
   | { type: "outgoing-status"; target: "background"; ok: boolean; message?: string }
+  // The Meet page lost its "mic-capture" port (e.g. the service worker restarted) and went back to your own voice.
+  | { type: "outgoing-port-lost"; target: "background" }
   // Meet only: is your voice reaching the call (null = unknown)? Notes follow Meet's mute.
   | { type: "meet-mic-state"; target: "background"; live: boolean | null };
 
@@ -210,11 +217,11 @@ export interface BackgroundResponse {
 
 export type OffscreenRequest =
   // originalLevel: volume of the meeting's own audio (tabCapture mutes the tab): 1 = as usual, 0 = silent.
-  | { type: "start-capture"; target: "offscreen"; streamId: string; outputDeviceId: string | null; originalLevel: number; duckLevel: number }
+  | { type: "start-capture"; target: "offscreen"; streamId: string; outputDeviceId: string | null; originalLevel: number }
   | { type: "stop-capture"; target: "offscreen" }
   | { type: "start-mic-capture"; target: "offscreen" }
   | { type: "stop-mic-capture"; target: "offscreen" }
-  | { type: "set-original-level"; target: "offscreen"; level: number; duckLevel: number }
+  | { type: "set-original-level"; target: "offscreen"; level: number }
   | { type: "translated-audio"; target: "offscreen"; data: number[] }
   | { type: "set-output-device"; target: "offscreen"; deviceId: string | null };
 

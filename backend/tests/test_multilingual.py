@@ -151,7 +151,18 @@ def translations(seen):
     return [m for m in seen if isinstance(m, dict) and m.get("type") == "translated_text"]
 
 
-def test_auto_ack_and_my_language_segment_is_not_translated_or_spoken(client):
+def spoken(ws):
+    """Everything up to the first audio, plus whatever else arrived before a ping was answered."""
+    seen = _recv_until(ws, lambda m: isinstance(m, bytes))
+    return seen + drain_until_pong(ws) + drain_until_pong(ws)
+
+
+def audio(seen):
+    return [m for m in seen if isinstance(m, bytes)]
+
+
+def test_auto_ack_and_my_language_segment_is_read_back_as_is_not_translated(client):
+    """The extension silences the original audio, so same-language speech is spoken (once) too."""
     client.fakes.script = [
         ("transcript", "Good morning everyone.", True, "1", "en"),
         ("translation", "Good morning everyone.", True, "1", "en"),  # provider echo
@@ -161,13 +172,63 @@ def test_auto_ack_and_my_language_segment_is_not_translated_or_spoken(client):
         assert session["auto_language"] is True and session["source_lang"] == "auto"
         assert client.fakes.last_stt.language == "auto"
         ws.send_bytes(b"\x00\x00" * 800)
-        seen = drain_until_pong(ws)
+        seen = spoken(ws)
     assert finals(seen)[0]["language"] == "en"
     assert translations(seen) == []
-    assert not any(isinstance(m, bytes) for m in seen)
-    assert client.fakes.tts_calls == []
+    assert len(audio(seen)) == 1
+    assert client.fakes.tts_calls == [("Good morning everyone.", "en")]
     segments = client.get(f"/api/meetings/{session['meeting_id']}").json()["segments"]
-    assert segments[0]["language"] == "en"
+    assert segments[0]["language"] == "en" and not segments[0]["translated_text"]
+
+
+def test_auto_my_language_segment_with_untagged_provider_echo_is_spoken_once(client):
+    client.fakes.script = [
+        ("transcript", "Good morning everyone.", True, "1", "en"),
+        ("translation", "Good morning, everyone", True, "1"),  # echo without a language tag
+    ]
+    with client.websocket_connect("/ws/translate") as ws:
+        config(ws, source_lang="auto", target_lang="en")
+        ws.send_bytes(b"\x00\x00" * 800)
+        seen = spoken(ws)
+    assert translations(seen) == [] and len(audio(seen)) == 1
+    assert client.fakes.tts_calls == [("Good morning everyone.", "en")]
+
+
+def test_auto_mixed_room_speaks_everyone_in_order(client):
+    client.fakes.script = [
+        ("transcript", "કેમ છો બધા", True, "2", "gu"),
+        ("translation", "How is everyone", True, "2", "gu"),
+        ("transcript", "I am fine, thanks.", True, "1", "en"),
+    ]
+    with client.websocket_connect("/ws/translate") as ws:
+        config(ws, source_lang="auto", target_lang="en")
+        ws.send_bytes(b"\x00\x00" * 800)
+        seen = spoken(ws)
+        if len(audio(seen)) < 2:
+            seen += _recv_until(ws, lambda m: isinstance(m, bytes))
+    assert [t["text"] for t in translations(seen)] == ["How is everyone"]
+    assert client.fakes.tts_calls == [("How is everyone", "en"), ("I am fine, thanks.", "en")]
+
+
+def test_my_language_is_not_read_back_without_a_voice_or_in_fixed_mode(client):
+    # Translated text only (no TTS): the originals stay audible, nothing is spoken.
+    client.fakes.script = [("transcript", "Good morning everyone.", True, "1", "en")]
+    with client.websocket_connect("/ws/translate") as ws:
+        ack = config(ws, source_lang="auto", target_lang="en", tts_provider="no-such-voice")
+        assert ack["tts_provider"] is None
+        ws.send_bytes(b"\x00\x00" * 800)
+        assert audio(drain_until_pong(ws) + drain_until_pong(ws)) == []
+    assert client.fakes.tts_calls == []
+    # Fixed source language (e.g. the outgoing "my voice" socket): unchanged, never read back.
+    client.fakes.script = [
+        ("transcript", "Good morning everyone.", True, "1", "en"),
+        ("translation", "Good morning everyone.", True, "1", "en"),
+    ]
+    with client.websocket_connect("/ws/translate") as ws:
+        config(ws, source_lang="es", target_lang="en")
+        ws.send_bytes(b"\x00\x00" * 800)
+        seen = drain_until_pong(ws) + drain_until_pong(ws)
+    assert translations(seen) == [] and audio(seen) == [] and client.fakes.tts_calls == []
 
 
 def test_auto_foreign_segment_is_translated_tagged_and_spoken(client):
@@ -185,17 +246,19 @@ def test_auto_foreign_segment_is_translated_tagged_and_spoken(client):
     assert client.fakes.tts_calls == [("How is everyone", "en")]
 
 
-def test_auto_echo_translation_without_language_is_dropped(client):
+def test_auto_echo_translation_without_language_is_read_back_once_not_shown(client):
     client.fakes.script = [
         ("transcript", "Okay, thanks.", True, "1"),
         ("translation", "okay thanks", True, "1"),
+        ("translation", "okay thanks", True, "1"),  # a repeated echo must not be spoken again
     ]
     with client.websocket_connect("/ws/translate") as ws:
         config(ws, source_lang="auto", target_lang="en")
         ws.send_bytes(b"\x00\x00" * 800)
-        seen = drain_until_pong(ws)
+        seen = spoken(ws)
     assert finals(seen)[0]["language"] is None
-    assert translations(seen) == [] and client.fakes.tts_calls == []
+    assert translations(seen) == [] and len(audio(seen)) == 1
+    assert client.fakes.tts_calls == [("Okay, thanks.", "en")]
 
 
 def test_fixed_source_language_is_reported_on_segments(client):
@@ -234,7 +297,25 @@ def test_text_translator_gets_detected_language_and_flushes_on_language_change(c
     assert [(text, src) for text, src, _ in translator.calls][:2] == [("Namaste", "hi"), ("kem cho", "gu")]
 
 
-def test_text_translator_unknown_language_uses_auto_and_skips_unchanged_output(client, monkeypatch):
+def test_text_translator_reads_my_language_back_after_pending_translations(client, monkeypatch):
+    translator = FakeTranslator()
+    _use_text_translator(client, monkeypatch, translator)
+    client.fakes.script = [
+        ("transcript", "Namaste ji", True, "1", "hi"),  # no sentence end → still buffered
+        ("transcript", "Good morning.", True, "2", "en"),  # my language: flushes the buffer, then as-is
+    ]
+    with client.websocket_connect("/ws/translate") as ws:
+        config(ws, source_lang="auto", target_lang="en")
+        ws.send_bytes(b"\x00\x00" * 800)
+        seen = spoken(ws)
+        if len(audio(seen)) < 2:
+            seen += _recv_until(ws, lambda m: isinstance(m, bytes))
+    assert translator.calls == [("Namaste ji", "hi", "en")]
+    assert [t["text"] for t in translations(seen)] == ["[en] Namaste ji"]
+    assert client.fakes.tts_calls == [("[en] Namaste ji", "en"), ("Good morning.", "en")]
+
+
+def test_text_translator_unknown_language_uses_auto_and_reads_unchanged_output_back(client, monkeypatch):
     class EchoTranslator(FakeTranslator):
         async def translate(self, text, source, target):
             self.calls.append((text, source, target))
@@ -246,11 +327,10 @@ def test_text_translator_unknown_language_uses_auto_and_skips_unchanged_output(c
     with client.websocket_connect("/ws/translate") as ws:
         config(ws, source_lang="auto", target_lang="en")
         ws.send_bytes(b"\x00\x00" * 800)
-        seen = drain_until_pong(ws)
-        ws.send_text(json.dumps({"type": "ping"}))
-        seen += _recv_until(ws, is_type("pong"))
+        seen = spoken(ws)
     assert translator.calls == [("Thanks a lot.", "auto", "en")]
-    assert translations(seen) == [] and client.fakes.tts_calls == []
+    assert translations(seen) == [] and len(audio(seen)) == 1
+    assert client.fakes.tts_calls == [("Thanks a lot.", "en")]
 
 
 def test_reconfig_on_same_socket_switches_target_and_keeps_meeting(client):

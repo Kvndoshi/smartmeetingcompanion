@@ -55,6 +55,9 @@ function activateMicCapture(): void {
       micPort = null;
       // Stop feeding PCM and restore the real mic in the call.
       postToInterceptor("interpreter-deactivate");
+      // Wake the service worker (it may have restarted) so the widget stops showing
+      // "translating" while the call already carries your own voice again.
+      chrome.runtime.sendMessage({ type: "outgoing-port-lost", target: "background" }).catch(() => {});
     });
   }
   // (Re)signal the interceptor; it answers with interpreter-activation-result.

@@ -9,7 +9,7 @@ The standalone diagram is in [architecture.mmd](architecture.mmd).
 | Popup | `extension/src/popup/` | My language; **What I hear** (They speak, original-voice level), **What they hear** (Others hear me in, Translate my voice), **Take notes** (my mic); provider pickers, output device, Start/Stop, Memories search |
 | Side panel | `extension/src/sidepanel/` | Live transcript, Summary, Ask (chat), Meetings history. Reads and writes through the REST API, plus live broadcasts |
 | Service worker | `extension/src/background.ts` | Owns the backend WebSockets and session state (mirrored to `chrome.storage.session`). Broadcasts `target:"ui"` messages |
-| Offscreen document | `extension/src/offscreen/offscreen.ts` | `tabCapture` and optional `getUserMedia` mic → 16 kHz Int16 PCM. Plays translated WAVs. Plays the original audio through a gain node: full, quiet or muted, and ducked while a translation plays |
+| Offscreen document | `extension/src/offscreen/offscreen.ts` | `tabCapture` and optional `getUserMedia` mic → 16 kHz Int16 PCM. Plays translated WAVs. Plays the original audio through a gain node: muted (default) or quiet while a translated voice replaces it, full volume otherwise |
 | Meet widget, bridge and interceptor | `extension/src/content/meet-*.ts` | Floating controls on Meet (same three groups as the popup). Outgoing voice translation by swapping Meet's mic track for a stream that carries the translation, or your own voice when no translation is needed |
 | Room-language estimator | `extension/src/shared/roomLanguage.ts` | Pure function behind "Auto — match the room": picks the language most of the room speaks from recent tab segments |
 | Live session | `backend/services/session.py` | One per WebSocket: STT → optional translation → optional TTS. Stores final segments |
@@ -33,7 +33,7 @@ sequenceDiagram
     participant SM as Supermemory
 
     UI->>SW: start-capture {modes, sourceLang ("auto" or a code), targetLang, providers, includeMic, originalAudio}
-    SW->>OFS: start-capture {streamId, originalLevel, duckLevel}
+    SW->>OFS: start-capture {streamId, originalLevel}
     SW->>WS: config {mode, source:"tab", source_lang, target_lang, meeting_id?}
     WS-->>SW: session {meeting_id, providers, diarization, source_lang, target_lang, auto_language}
     loop audio
@@ -60,17 +60,17 @@ sequenceDiagram
   - "Unknown" never silences the notes.
 - **Auto-detected languages (What I hear).** With `source_lang:"auto"` the backend turns on the STT provider's language identification: Soniox `enable_language_identification`, or Deepgram `language=multi`.
   - Every transcript and translation carries the detected `language`, which is stored on the segment.
-  - Speech already in the listener's language is neither translated nor spoken.
+  - Speech already in the listener's language is never translated. When a translated voice is playing (auto-detect, TTS and a translator available) it is read back as-is by TTS, once, in order with the translations — the listener hears only synthesized audio, so nobody may go missing.
   - Soniox splits an utterance when the language changes at a sentence end.
   - Text translators get the detected language, or translate from "any language" when none is known.
-  - Output equal to the input is dropped as an echo.
+  - Output equal to the input is an echo: no translation line, and it is read back as-is like other same-language speech.
 - **Original audio level.** The offscreen document routes the tab through a gain node.
-  - Notes only, or no TTS voice: full volume.
-  - Fixed source language: quiet (0.15) or muted.
-  - Auto-detect: full volume, dropping to the quiet or muted level for 2.5 s after any speech in another language.
-  - While a translation plays, always quiet or muted, with a 600 ms release.
+  - Notes only, or the backend acked no TTS voice / no translator: full volume.
+  - Translating with a voice (fixed source language or auto-detect): 0 — `originalAudio: "muted"`, the default — or 0.15 with the opt-in `"quiet"`. The level is set before the first audio, so the originals never leak ahead of their translation.
 - **Outgoing translation (Meet only).** The interceptor patches `addTrack`, `addTransceiver` and `replaceTrack` and streams your mic PCM over a port to a third socket.
-  - That socket translates from **My language** into the effective outgoing language, `outgoingLang`. It is the chosen **Others hear me in** language. With **Auto — match the room** it is the fixed **They speak** language, or else the room estimator's pick from the other participants' detected languages.
+  - The interceptor fails open and stays invisible to Meet: Meet's own calls reach the native method synchronously (nothing of ours is awaited first), `sender.track` keeps returning Meet's own track while ours is on the wire, and our track only mirrors Meet's mute. If the pipeline can't be built or its `AudioContext` isn't running (5 s cap), the call keeps the real mic and the error is reported to the UI.
+  - One pipeline per activation: a microphone switch only swaps the mic source node, so the track on the wire doesn't change.
+  - That socket translates from **My language** into the effective outgoing language, `outgoingLang`. It is the chosen **Others hear me in** language. With **Auto — match the room** it is the fixed **They speak** language, or else the room estimator's pick from the other participants' detected languages. Auto with nothing to match (no capture on that tab and no fixed **They speak**) is refused with a message instead of silently sending your own voice.
   - The translated WAVs play into a `MediaStreamDestination` whose track Meet sends to the other participants.
   - When `outgoingLang` is null (it's your own language, or the room language is unknown), the service worker sends `interpreter-mix {mic:true}`. The interceptor then mixes your real mic into the same track, and the backend socket is re-configured to transcribe-only. Your voice comes back only after queued translated speech has finished.
   - A language change re-sends `config` on the open socket, and the backend re-configures in place, keeping `meeting_id`. There is no reconnect or `replaceTrack` churn.

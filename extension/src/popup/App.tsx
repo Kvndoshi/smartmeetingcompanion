@@ -156,7 +156,8 @@ export default function App() {
   const [targetLang, setTargetLang] = useState("en");
   // Others hear me in ("auto" = match the room).
   const [speakLang, setSpeakLang] = useState(AUTO);
-  const [originalAudio, setOriginalAudio] = useState<OriginalAudio>("quiet");
+  // Default: you hear only the translated voice; "quiet" keeps the originals underneath (opt-in).
+  const [originalAudio, setOriginalAudio] = useState<OriginalAudio>("muted");
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [modes, setModes] = useState<Modes>({ translate: true, notes: true });
   // On by default: your own voice is part of the meeting (Meet never plays it back in the tab).
@@ -404,7 +405,7 @@ export default function App() {
     setVoiceBusy(true);
     const res = session?.isMicTranslating
       ? await ext.send({ type: "stop-mic-translation", target: "background" })
-      : await ext.send({ type: "start-mic-translation", target: "background", myLang: targetLang, speakLang, tabId: targetTab?.id });
+      : await ext.send({ type: "start-mic-translation", target: "background", myLang: targetLang, speakLang, roomHint: sourceLang, tabId: targetTab?.id });
     setVoiceBusy(false);
     if (!res.success) setErrorMsg(res.error || "Voice translation failed");
   };
@@ -478,11 +479,18 @@ export default function App() {
         return { dot: "error", text: "Voice translation stopped — see the message above" };
       case "on":
         if (session.outgoingLang) return { dot: "on", text: `Others hear you in ${langName(session.outgoingLang)}` };
+        // Auto with nothing to match yet: on, but NOT translating — say so plainly.
         if (session.speakLang === AUTO && !session.isCapturing)
-          return { dot: "on", text: "Others hear your own voice — press Start so Distill can hear which language the room speaks" };
+          return {
+            dot: "starting",
+            text: "Not translating — others hear your own voice. Pick a language above, or press Start so Distill can hear which language the room speaks.",
+          };
         if (session.speakLang === AUTO)
-          return { dot: "on", text: `Others hear your own voice — the room speaks ${myLangName} or hasn't said enough yet` };
-        return { dot: "on", text: "Others hear your own voice" };
+          return {
+            dot: "starting",
+            text: `Not translating yet — others hear your own voice until Distill has heard the room speak another language than ${myLangName} (a couple of sentences). Pick a language above to translate right away.`,
+          };
+        return { dot: "starting", text: "Not translating — others hear your own voice" };
       default:
         return { dot: "", text: "" };
     }
@@ -632,7 +640,8 @@ export default function App() {
               )}
               {sourceLang === AUTO && (
                 <div className="device-hint">
-                  Each speaker's language is detected; anyone already speaking {myLangName} is heard as-is.
+                  Each speaker's language is detected. You hear everyone in a {myLangName} voice — people already speaking {myLangName} are
+                  read back as they said it.
                 </div>
               )}
               {sourceLang === AUTO && !autoCapable && (

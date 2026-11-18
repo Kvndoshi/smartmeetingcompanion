@@ -18,7 +18,9 @@ Server → client:
   {"type":"transcript", text, is_final, speaker, source, language, segment_id?, start_ms?}
   {"type":"translated_text_partial"|"translated_text", text, language, segment_id?, ...}
   `language` = ISO base code of what was said (null when unknown). Segments
-  already in target_lang are neither translated nor spoken.
+  already in target_lang are never translated (no translated_text). With
+  source_lang "auto" and a translated voice they are still spoken — the original
+  text, as-is — because the listener hears only the synthesized audio.
   binary WAV audio · {"type":"stopped"} · {"type":"meeting_ended", meeting_id}
   {"type":"error", message, code} · {"type":"warning", message} · {"type":"pong"}
 """
@@ -93,6 +95,7 @@ class LiveSession:
         self._pending_speaker: str | None = None
         self._pending_language: str | None = None
         self._last_final_text = ""
+        self._last_final_spoken = False  # was the latest final already read back as-is?
         self._flush_task: asyncio.Task[None] | None = None
         self._last_segment_id: int | None = None
         self._stt_t0: float | None = None
@@ -195,6 +198,8 @@ class LiveSession:
         # A re-config (e.g. a new target language) must not speak queued text in the old one.
         self._pending = []
         self._drain_queue()
+        self._last_final_text = ""
+        self._last_final_spoken = False
         self.config = msg
         self.source_lang = _lang(msg.get("source_lang"), "en")
         self.target_lang = _lang(msg.get("target_lang"), "es")
@@ -384,6 +389,21 @@ class LiveSession:
     def _same_as_target(self, language: str | None) -> bool:
         return bool(language) and language == _base(self.target_lang)
 
+    def _speaks_as_is(self) -> bool:
+        """Read back speech that is already in the target language?
+
+        With auto-detect and a translated voice the extension silences the original
+        audio, so a speaker who needs no translation would otherwise go unheard.
+        Fixed-language sessions (incl. the outgoing "my voice" socket) are untouched,
+        and so are sessions that cannot translate: there the originals stay audible.
+        """
+        return (
+            self.auto_source
+            and self.translate
+            and bool(self.tts_chain)
+            and (self.native_translation or self.translator is not None)
+        )
+
     async def _on_transcript(
         self,
         text: str,
@@ -409,6 +429,7 @@ class LiveSession:
         segment_id: int | None = None
         if is_final and text.strip():
             self._last_final_text = text.strip()
+            self._last_final_spoken = False
             if self.meeting:
                 seg = meeting_store.add_segment(
                     self.meeting["id"],
@@ -424,8 +445,13 @@ class LiveSession:
                 payload["start_ms"] = seg["start_ms"]
                 self._last_segment_id = segment_id
                 self._maybe_checkpoint_memory()
-            # Already in the listener's language → nothing to translate or speak.
-            if self.translator is not None and self.open and not self._same_as_target(lang):
+            if self._same_as_target(lang):
+                # Already in the listener's language → nothing to translate; read it back as-is.
+                if self.open and self._speaks_as_is():
+                    await self._flush_translation()  # earlier speech is spoken first
+                    await self.queue.put(("tts", text.strip(), spk))
+                    self._last_final_spoken = True
+            elif self.translator is not None and self.open:
                 await self._buffer_for_translation(text.strip(), segment_id, spk, lang)
         await self.send_json(payload)
 
@@ -436,7 +462,9 @@ class LiveSession:
             return
         lang = self._segment_language(language)
         if self._same_as_target(lang):
-            return  # a provider "translating" speech that is already in the target language
+            # A provider "translating" speech that is already in the target language;
+            # _on_transcript reads the original back when it should be heard.
+            return
         spk = self._speaker(speaker)
         if not is_final:
             await self.send_json(
@@ -444,7 +472,12 @@ class LiveSession:
             )
             return
         if self.auto_source and self._last_final_text and _norm(text) == _norm(self._last_final_text):
-            return  # echo of the original (language unknown): don't re-speak it
+            # Echo of the original: it was already in the target language (undetected).
+            # Not a translation — but read it back once so the speaker is heard.
+            if not self._last_final_spoken and self.open and self._speaks_as_is():
+                self._last_final_spoken = True
+                await self.queue.put(("tts", self._last_final_text, spk))
+            return
         segment_id = self._last_segment_id
         await self.send_json(
             {
@@ -535,7 +568,10 @@ class LiveSession:
         if not translated:
             return
         if self.auto_source and _norm(translated) == _norm(text):
-            return  # it was already in the target language
+            # It was already in the target language: no translation to show, read it back as-is.
+            if self._speaks_as_is():
+                await self._speak(text, speaker)
+            return
         segment_id = segment_ids[-1] if segment_ids else None
         await self.send_json(
             {
