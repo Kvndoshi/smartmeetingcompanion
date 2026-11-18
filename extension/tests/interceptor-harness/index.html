@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Interceptor harness</title>
+<!--
+  Browser tests for src/content/meet-interceptor.ts (the Meet mic swap).
+  1. npm run build && node tests/interceptor-harness/prepare.mjs
+  2. Serve this folder on 127.0.0.1 (e.g. python -m http.server 5181 --bind 127.0.0.1)
+  3. Open it in Chrome, click "Run interceptor tests"; every line should say PASS.
+-->
+<!-- Loaded first, like the MAIN-world content script at document_start -->
+<script src="interceptor.js"></script>
+</head>
+<body>
+<button id="run" style="font-size:20px;padding:12px">Run interceptor tests</button>
+<pre id="out"></pre>
+<script>
+const out = document.getElementById("out");
+const results = [];
+function log(name, pass, detail) {
+  results.push({ name, pass, detail });
+  out.textContent += `${pass ? "PASS" : "FAIL"}  ${name}  ${detail ?? ""}\n`;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function post(type, extra) { window.postMessage({ source: "interpreter-ext", type, ...extra }, "*"); }
+function nextActivation(timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { window.removeEventListener("message", h); resolve(null); }, timeoutMs);
+    function h(e) {
+      if (e.data && e.data.source === "interpreter-ext" && e.data.type === "interpreter-activation-result") {
+        clearTimeout(t); window.removeEventListener("message", h); resolve(e.data);
+      }
+    }
+    window.addEventListener("message", h);
+  });
+}
+function countPcm(ms) {
+  return new Promise((resolve) => {
+    let n = 0, bytes = 0;
+    const h = (e) => { if (e.data && e.data.type === "interpreter-mic-pcm") { n++; bytes += e.data.data.byteLength; } };
+    window.addEventListener("message", h);
+    setTimeout(() => { window.removeEventListener("message", h); resolve({ n, bytes }); }, ms);
+  });
+}
+function wav16k(seconds, freq) {
+  const rate = 16000, n = Math.floor(rate * seconds), buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * 12000), true);
+  return Array.from(new Uint8Array(buf));
+}
+async function connect(pc1, pc2) {
+  pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+  pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+  const offer = await pc1.createOffer(); await pc1.setLocalDescription(offer); await pc2.setRemoteDescription(offer);
+  const answer = await pc2.createAnswer(); await pc2.setLocalDescription(answer); await pc1.setRemoteDescription(answer);
+}
+
+function waitMicState(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { window.removeEventListener("message", h); resolve(null); }, timeoutMs);
+    function h(e) {
+      if (e.data && e.data.source === "interpreter-ext" && e.data.type === "interpreter-mic-state") {
+        clearTimeout(t); window.removeEventListener("message", h); resolve(e.data);
+      }
+    }
+    window.addEventListener("message", h);
+  });
+}
+function micState() { const p = waitMicState(); post("interpreter-mic-state-request"); return p; }
+
+/** Loudest level (dBFS) of `freq` Hz on `track` over `ms` — the fake mic is a 440 Hz tone, TTS is 660 Hz. */
+async function toneLevel(track, freq, ms = 500) {
+  if (!track) return -Infinity;
+  const actx = new AudioContext(); await actx.resume();
+  const src = actx.createMediaStreamSource(new MediaStream([track]));
+  const an = actx.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0; src.connect(an);
+  const bins = new Float32Array(an.frequencyBinCount);
+  const i = Math.round(freq / (actx.sampleRate / an.fftSize));
+  let max = -Infinity;
+  const end = performance.now() + ms;
+  await sleep(60);
+  while (performance.now() < end) {
+    an.getFloatFrequencyData(bins);
+    max = Math.max(max, bins[i - 1], bins[i], bins[i + 1]);
+    await sleep(40);
+  }
+  await actx.close();
+  return max;
+}
+const HEARD = -70, SILENT = -85;
+const db = (v) => (Number.isFinite(v) ? `${v.toFixed(1)} dB` : String(v));
+
+async function run() {
+  try {
+    // 0. Before any call, "voice in call" is unknown (never silences the notes)
+    const st0 = await micState();
+    log("voice-in-call is unknown before any mic sender", st0 && st0.live === null, JSON.stringify(st0));
+    // 1. Activation before any mic exists → ok:false with a helpful message
+    let p = nextActivation(); post("interpreter-activate"); let r = await p;
+    log("activate without mic reports failure", r && r.ok === false && /microphone/i.test(r.message || ""), JSON.stringify(r));
+
+    // Fake mic: oscillator → MediaStreamDestination
+    const ctx = new AudioContext(); await ctx.resume();
+    const osc = ctx.createOscillator(); osc.frequency.value = 440;
+    const d1 = ctx.createMediaStreamDestination(); osc.connect(d1); osc.start();
+    const mic = d1.stream.getAudioTracks()[0];
+
+    const pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+    const sender = pc1.addTrack(mic, d1.stream);
+    log("addTrack while inactive sends the real mic", sender.track === mic);
+    await connect(pc1, pc2);
+
+    // 2. Activate → ok:true, sender now carries the translated (replacement) track
+    p = nextActivation(); post("interpreter-activate"); r = await p;
+    log("activate reports ok", r && r.ok === true, JSON.stringify(r));
+    const repl1 = sender.track;
+    log("sender swapped to replacement track", !!repl1 && repl1 !== mic && repl1.readyState === "live", repl1 && repl1.id);
+
+    // 3. Mic PCM is streamed out (16 kHz Int16 → ~32 kB/s)
+    const pcm = await countPcm(1500);
+    log("mic PCM flows while active", pcm.n >= 3 && pcm.bytes > 20000, JSON.stringify(pcm));
+
+    // 4. Translated WAV playback doesn't throw (check console for errors)
+    post("interpreter-translated-audio", { data: wav16k(0.3, 660) });
+    post("interpreter-translated-audio", { data: wav16k(0.3, 880) });
+    await sleep(300);
+    log("translated audio accepted", true);
+
+    // 5. Meet switches mic via replaceTrack while active → rebuild, sender gets a NEW replacement
+    const d2 = ctx.createMediaStreamDestination(); osc.connect(d2);
+    const mic2 = d2.stream.getAudioTracks()[0];
+    await sender.replaceTrack(mic2);
+    const repl2 = sender.track;
+    log("replaceTrack(mic2) keeps a translated track on the sender", !!repl2 && repl2 !== mic2 && repl2 !== mic && repl2.readyState === "live", `same-as-before=${repl2 === repl1}`);
+    const pcm2 = await countPcm(1200);
+    log("PCM still flows after mic switch", pcm2.n >= 2, JSON.stringify(pcm2));
+
+    // 6. A second connection added while active gets the translated track immediately
+    const pc3 = new RTCPeerConnection(), pc4 = new RTCPeerConnection();
+    const tx = pc3.addTransceiver(mic2, { direction: "sendonly" });
+    await sleep(400);
+    log("addTransceiver(mic2) while active sends the replacement", tx.sender.track === sender.track && tx.sender.track !== mic2, tx.sender.track && tx.sender.track.id);
+    await connect(pc3, pc4);
+
+    // 7. Closed connections are pruned and don't break swaps
+    pc3.close(); pc4.close();
+
+    // 8. Deactivate → every live sender back on the real mic
+    post("interpreter-deactivate"); await sleep(500);
+    log("deactivate restores the real mic", sender.track === mic2, sender.track && sender.track.id);
+    const pcm3 = await countPcm(800);
+    log("PCM stops after deactivate", pcm3.n === 0, JSON.stringify(pcm3));
+
+    // 9. Re-activate works again (pipeline rebuilt from mic2)
+    p = nextActivation(); post("interpreter-activate"); r = await p;
+    log("re-activate ok", r && r.ok === true && sender.track !== mic2, JSON.stringify(r));
+    post("interpreter-deactivate"); await sleep(300);
+    log("final deactivate restores mic", sender.track === mic2);
+
+    // 10. Mute in Meet (replaceTrack(null)) must survive activate / deactivate
+    p = nextActivation(); post("interpreter-activate"); r = await p;
+    await sender.replaceTrack(null);
+    log("mute while active detaches the sender", sender.track === null);
+    post("interpreter-deactivate"); await sleep(400);
+    log("deactivate keeps a muted sender muted", sender.track === null, String(sender.track && sender.track.id));
+    p = nextActivation(); post("interpreter-activate"); r = await p;
+    log("activate while muted is ok but doesn't unmute", r && r.ok === true && sender.track === null, JSON.stringify(r));
+    const pcmMuted = await countPcm(900);
+    const silent = await new Promise((resolve) => {
+      let loud = 0; const h = (e) => { if (e.data && e.data.type === "interpreter-mic-pcm") { const a = new Int16Array(e.data.data); for (const v of a) if (Math.abs(v) > 50) { loud++; break; } } };
+      window.addEventListener("message", h); setTimeout(() => { window.removeEventListener("message", h); resolve(loud === 0); }, 800);
+    });
+    log("muted: stream stays alive but carries only silence", pcmMuted.n >= 2 && silent, JSON.stringify(pcmMuted));
+    await sender.replaceTrack(mic2);
+    const repl3 = sender.track;
+    log("unmute while active sends the translated track", !!repl3 && repl3 !== mic2 && repl3.readyState === "live");
+    post("interpreter-deactivate"); await sleep(400);
+    log("deactivate after unmute restores the real mic", sender.track === mic2);
+
+    // 10b. Own-voice mix ("Others hear your own voice" while translation is on)
+    p = nextActivation(); post("interpreter-activate"); r = await p;
+    let lvl = await toneLevel(sender.track, 440);
+    log("translation only by default: your real voice is not on the call track", r && r.ok === true && lvl < SILENT, db(lvl));
+    post("interpreter-mix", { mic: true }); await sleep(250);
+    lvl = await toneLevel(sender.track, 440);
+    log("mix on: your real voice is on the call track", lvl > HEARD, db(lvl));
+    post("interpreter-mix", { mic: false }); await sleep(200);
+    lvl = await toneLevel(sender.track, 440);
+    log("mix off: your voice leaves the call track at once", lvl < SILENT, db(lvl));
+
+    // Turning your own voice back on waits for translated speech that is still queued
+    post("interpreter-translated-audio", { data: wav16k(1.4, 660) });
+    await sleep(120);
+    post("interpreter-mix", { mic: true });
+    const during = await toneLevel(sender.track, 440, 600);
+    const ttsLvl = await toneLevel(sender.track, 660, 250);
+    log("own voice stays off while queued translation plays", during < SILENT && ttsLvl > HEARD, `voice ${db(during)}, translation ${db(ttsLvl)}`);
+    await sleep(700);
+    lvl = await toneLevel(sender.track, 440);
+    log("own voice comes back once the translation finished", lvl > HEARD, db(lvl));
+
+    // The mix survives Meet switching microphones (pipeline rebuild)
+    const d4 = ctx.createMediaStreamDestination(); osc.connect(d4);
+    const mic3 = d4.stream.getAudioTracks()[0];
+    await sender.replaceTrack(mic3);
+    lvl = await toneLevel(sender.track, 440);
+    log("own-voice mix survives a microphone switch", sender.track !== mic3 && lvl > HEARD, db(lvl));
+
+    // Mute still wins in own-voice mode
+    await sender.replaceTrack(null);
+    post("interpreter-mix", { mic: true }); await sleep(200);
+    log("muted sender stays muted in own-voice mode", sender.track === null);
+    await sender.replaceTrack(mic3);
+    log("unmute in own-voice mode sends the mixed track", !!sender.track && sender.track !== mic3);
+    post("interpreter-mix", { mic: false });
+    post("interpreter-deactivate"); await sleep(400);
+    log("deactivate after own-voice mode restores the real mic", sender.track === mic3);
+    await sender.replaceTrack(mic2); // later checks expect mic2
+
+    // 11. Deactivate when translation never ran must not touch the call
+    const d3 = ctx.createMediaStreamDestination(); osc.connect(d3);
+    const other = d3.stream.getAudioTracks()[0];
+    const pc5 = new RTCPeerConnection();
+    const s5 = pc5.addTrack(other, d3.stream);
+    post("interpreter-deactivate"); await sleep(300);
+    log("deactivate while idle leaves every sender alone", s5.track === other && sender.track === mic2);
+
+    // 12. "Is your voice reaching the call?" reporting (drives the notes mic)
+    pc5.close();
+    let st = await micState(true);
+    log("voice reported live while unmuted in the call", st && st.live === true, JSON.stringify(st));
+    let next = waitMicState(); mic2.enabled = false; st = await next;
+    log("disabling the mic track reports not live", st && st.live === false, JSON.stringify(st));
+    next = waitMicState(); mic2.enabled = true; st = await next;
+    log("re-enabling reports live again", st && st.live === true, JSON.stringify(st));
+    next = waitMicState(); await sender.replaceTrack(null); st = await next;
+    log("Meet detaching the sender (mute) reports not live", st && st.live === false, JSON.stringify(st));
+    next = waitMicState(); await sender.replaceTrack(mic2); st = await next;
+    log("unmute reports live", st && st.live === true, JSON.stringify(st));
+    const btn = document.createElement("button"); btn.setAttribute("aria-label", "Turn on microphone (ctrl + d)"); btn.setAttribute("data-is-muted", "true"); document.body.appendChild(btn);
+    next = waitMicState(); st = await next;
+    log("Meet's mute button wins over track state", st && st.live === false, JSON.stringify(st));
+    btn.remove();
+    next = waitMicState(); st = await next;
+    log("removing the muted button reports live", st && st.live === true, JSON.stringify(st));
+    next = waitMicState(); pc1.close(); st = await next;
+    log("leaving the call reports not live", st && st.live === false, JSON.stringify(st));
+  } catch (err) {
+    log("harness exception", false, String(err && err.stack || err));
+  }
+  window.__results = results;
+  out.textContent += `\nDONE ${results.filter((x) => x.pass).length}/${results.length}\n`;
+}
+document.getElementById("run").addEventListener("click", () => void run());
+</script>
+</body>
+</html>

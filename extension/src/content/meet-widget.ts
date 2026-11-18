@@ -2,11 +2,12 @@
  * Google Meet overlay widget — injected as a content script.
  * Renders a floating control panel at the bottom-right of the meeting window
  * (shadow DOM for style isolation). It mirrors the service worker's session
- * state from `target: "ui"` broadcasts and offers quick start/stop, Meet-only
- * "translate my voice", and a shortcut to the notes side panel.
+ * state from `target: "ui"` broadcasts and offers the same three groups as the
+ * popup: My language, What I hear (others → me) and What they hear (my voice →
+ * the call), plus a shortcut to the notes side panel.
  */
 
-import { LANGUAGES } from "../utils/languages";
+import { AUTO, LANGUAGES, langName, langShort, sameLanguage } from "../utils/languages";
 import { INITIAL_STATE, speakerLabel, type Modes, type SessionState, type Source, type UiMessage } from "../shared/protocol";
 
 const MEETING_PATTERN = /^\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i;
@@ -18,6 +19,7 @@ interface Entry {
   speaker: string | null;
   orig: string;
   trans: string;
+  lang?: string | null;
   segmentId?: number;
 }
 
@@ -319,31 +321,43 @@ const WIDGET_CSS = `
   color: var(--text);
 }
 
-.swap-btn {
-  width: 28px;
-  height: 28px;
-  background: var(--glass-2);
-  border: 1px solid var(--glass-border);
-  border-radius: 50%;
-  color: var(--muted);
-  cursor: pointer;
+/* groups: My language / What I hear / What they hear */
+.w-field {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.25s;
+  flex-direction: column;
+  gap: 5px;
 }
 
-.swap-btn svg { width: 12px; height: 12px; transition: transform 0.3s; }
-
-.swap-btn:hover {
-  color: var(--text2);
-  background: var(--glass-3);
-  border-color: rgba(255,255,255,0.22);
+.w-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
 }
 
-.swap-btn:hover svg { transform: rotate(180deg); }
-.swap-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.w-group {
+  --g: #0a84ff;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  border-left: 3px solid var(--g);
+  background: color-mix(in srgb, var(--g) 7%, transparent);
+}
+
+.w-group.speak { --g: #bf5af2; }
+
+.w-group .w-label { color: var(--g); display: flex; align-items: center; gap: 6px; }
+.w-group .w-label svg { width: 12px; height: 12px; }
+
+.w-hint {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.35;
+}
 
 /* action button */
 .action-btn {
@@ -469,40 +483,56 @@ const WIDGET_CSS = `
   align-items: flex-end;
 }
 
-/* ── Mic Translation Button ── */
+/* ── "Translate my voice" button (What they hear) ── */
 .action-btn.mic-start {
   background: linear-gradient(160deg, var(--glass-3) 0%, var(--glass-1) 100%);
-  color: var(--amber);
-  border: 1px solid rgba(255, 159, 10, 0.18);
-  margin-top: 6px;
+  color: #d49cf7;
+  border: 1px solid rgba(191, 90, 242, 0.35);
+  padding: 10px 14px;
+  font-size: 12.5px;
 }
 
 .action-btn.mic-start:hover {
-  background: var(--amber-dim);
-  border-color: var(--amber);
+  background: rgba(191, 90, 242, 0.16);
+  border-color: #bf5af2;
 }
 
 .action-btn.mic-stop {
-  background: var(--amber-dim);
-  color: var(--amber);
-  border: 1px solid var(--amber);
-  margin-top: 6px;
+  background: #bf5af2;
+  color: #ffffff;
+  border: 1px solid #bf5af2;
   box-shadow: none;
+  padding: 10px 14px;
+  font-size: 12.5px;
 }
 
-.action-btn.mic-stop:hover {
-  background: rgba(255, 159, 10, 0.20);
-}
+.action-btn.mic-stop:hover { opacity: 0.92; }
+.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Mic status row */
+/* Voice status line */
 .p-mic-status {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 7px;
-  padding: 4px 16px 0;
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--text2);
   font-weight: 500;
+  line-height: 1.35;
+}
+
+.p-mic-status .s-dot { margin-top: 3px; flex: none; }
+.p-mic-status:empty, .p-mic-status.hidden { display: none; }
+
+.t-lang {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--glass-border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.4px;
+  color: var(--text2);
 }
 
 /* Transcript source label */
@@ -567,7 +597,7 @@ const SVG_GLOBE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 const SVG_WAVEFORM = `<svg viewBox="0 0 32 20" fill="currentColor" class="wf"><rect class="wf-bar" x="3" y="6" width="3" height="8" rx="1.5"/><rect class="wf-bar" x="8.5" y="3" width="3" height="14" rx="1.5"/><rect class="wf-bar" x="14" y="1" width="3" height="18" rx="1.5"/><rect class="wf-bar" x="19.5" y="4" width="3" height="12" rx="1.5"/><rect class="wf-bar" x="25" y="6.5" width="3" height="7" rx="1.5"/></svg>`;
 
-const SVG_SWAP = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16l-4-4 4-4"/><path d="M17 8l4 4-4 4"/><path d="M3 12h18"/></svg>`;
+const SVG_HEADPHONES = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z"/></svg>`;
 
 const SVG_PLAY = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v14l11-7-11-7z"/></svg>`;
 
@@ -592,8 +622,9 @@ class InterpreterWidget {
   private expanded = false;
   private state: SessionState = { ...INITIAL_STATE };
   private modes: Modes = { translate: true, notes: true };
-  private sourceLang = "en";
-  private targetLang = "es";
+  private myLang = "en"; // storage key "targetLang": I speak it and want to hear it
+  private sourceLang = AUTO; // They speak
+  private speakLang = AUTO; // Others hear me in
 
   private entries: Entry[] = [];
   private partials: Partial<Record<Source, PartialLine>> = {};
@@ -606,9 +637,11 @@ class InterpreterWidget {
   private statusLabel!: HTMLSpanElement;
   private flashEl!: HTMLDivElement;
   private waveformEl!: HTMLDivElement;
+  private myLangSelect!: HTMLSelectElement;
   private sourceSelect!: HTMLSelectElement;
-  private targetSelect!: HTMLSelectElement;
-  private swapBtn!: HTMLButtonElement;
+  private speakSelect!: HTMLSelectElement;
+  private micHint!: HTMLDivElement;
+  private micStatusRow!: HTMLDivElement;
   private actionBtn!: HTMLButtonElement;
   private micActionBtn!: HTMLButtonElement;
   private notesBtn!: HTMLButtonElement;
@@ -620,12 +653,25 @@ class InterpreterWidget {
     if (msg && typeof msg === "object" && (msg as { target?: string }).target === "ui") this.handleUiMessage(msg as UiMessage);
   };
   private readonly onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-    if (area !== "sync" || !changes.modes) return;
-    const next = changes.modes.newValue as Modes | undefined;
-    if (next && typeof next.translate === "boolean") {
-      this.modes = next;
-      this.render();
+    if (area !== "sync") return;
+    const next = changes.modes?.newValue as Modes | undefined;
+    if (next && typeof next.translate === "boolean") this.modes = next;
+    // Keep the selects in step with the popup.
+    const str = (key: string) => (typeof changes[key]?.newValue === "string" ? (changes[key].newValue as string) : null);
+    const my = str("targetLang");
+    if (my) {
+      this.myLang = my;
+      this.myLangSelect.value = my;
+      this.fillSpeakOptions();
     }
+    const src = str("sourceLang");
+    if (src) this.sourceLang = this.sourceSelect.value = src;
+    const speak = str("speakLang");
+    if (speak) {
+      this.speakLang = speak;
+      this.speakSelect.value = speak;
+    }
+    if (next || my || src || speak) this.render();
   };
 
   constructor() {
@@ -696,30 +742,59 @@ class InterpreterWidget {
     this.flashEl = this.el("div", "p-flash");
     this.flashEl.hidden = true;
 
-    // Mic (your voice) status
-    const micStatusRow = this.el("div", "p-mic-status");
+    // Your voice status (inside "What they hear")
+    this.micStatusRow = this.el("div", "p-mic-status");
     this.micStatusDot = this.el("div", "s-dot");
     this.micStatusLabel = this.el("span");
-    micStatusRow.append(this.micStatusDot, this.micStatusLabel);
+    this.micStatusRow.append(this.micStatusDot, this.micStatusLabel);
 
     // Body
     const body = this.el("div", "p-body");
 
-    const langs = this.el("div", "langs");
-    this.sourceSelect = this.buildLangSelect(this.sourceLang);
-    this.targetSelect = this.buildLangSelect(this.targetLang);
-    this.sourceSelect.title = "Language spoken in the meeting";
-    this.targetSelect.title = "Your language";
-    this.swapBtn = this.el("button", "swap-btn");
-    this.swapBtn.innerHTML = SVG_SWAP;
-    this.swapBtn.addEventListener("click", () => this.swapLangs());
-    langs.append(this.sourceSelect, this.swapBtn, this.targetSelect);
+    // My language
+    const myField = this.el("label", "w-field");
+    const myLabel = this.el("span", "w-label");
+    myLabel.textContent = "My language — I speak & hear";
+    this.myLangSelect = this.buildSelect([], this.myLang);
+    this.myLangSelect.title = "The language you speak and want to hear";
+    this.myLangSelect.addEventListener("change", () => {
+      this.myLang = this.myLangSelect.value;
+      chrome.storage.sync.set({ targetLang: this.myLang });
+      this.fillSpeakOptions();
+      this.render();
+    });
+    myField.append(myLabel, this.wrap(this.myLangSelect));
 
+    // 🎧 What I hear — others translated into my language
+    const hear = this.el("div", "w-group hear");
+    const hearLabel = this.el("span", "w-label");
+    hearLabel.innerHTML = `${SVG_HEADPHONES}<span>What I hear · they speak</span>`;
+    this.sourceSelect = this.buildSelect([[AUTO, "Auto-detect (any language)"]], this.sourceLang);
+    this.sourceSelect.title = "The language the others speak — Auto-detect handles several languages";
+    this.sourceSelect.addEventListener("change", () => {
+      this.sourceLang = this.sourceSelect.value;
+      chrome.storage.sync.set({ sourceLang: this.sourceLang });
+    });
     this.actionBtn = this.el("button", "action-btn start");
     this.actionBtn.addEventListener("click", () => this.toggleCapture());
+    hear.append(hearLabel, this.wrap(this.sourceSelect), this.actionBtn);
 
+    // 🎤 What they hear — my voice translated for the call
+    const speak = this.el("div", "w-group speak");
+    const speakLabel = this.el("span", "w-label");
+    speakLabel.innerHTML = `${SVG_MIC}<span>What they hear · others hear me in</span>`;
+    this.speakSelect = this.buildSelect([[AUTO, "Auto — match the room"]], this.speakLang);
+    this.speakSelect.title = "Everyone in the call hears your voice in this one language";
+    this.speakSelect.addEventListener("change", () => {
+      this.speakLang = this.speakSelect.value;
+      chrome.storage.sync.set({ speakLang: this.speakLang });
+      if (this.state.isMicTranslating) this.send({ type: "set-speak-language", target: "background", speakLang: this.speakLang });
+    });
     this.micActionBtn = this.el("button", "action-btn mic-start");
     this.micActionBtn.addEventListener("click", () => this.toggleMicTranslation());
+    this.micHint = this.el("div", "w-hint");
+    this.micHint.textContent = "Use headphones. If the others run Distill too, leave this off — they hear you in their own language.";
+    speak.append(speakLabel, this.wrap(this.speakSelect), this.micActionBtn, this.micStatusRow, this.micHint);
 
     this.notesBtn = this.el("button", "action-btn notes");
     this.notesBtn.innerHTML = `${SVG_NOTES}<span>Open notes panel</span>`;
@@ -727,26 +802,43 @@ class InterpreterWidget {
 
     this.transcriptBox = this.el("div", "transcript");
 
-    body.append(langs, this.actionBtn, this.micActionBtn, this.notesBtn, this.transcriptBox);
-    this.panel.append(header, statusRow, this.flashEl, micStatusRow, body);
+    body.append(myField, hear, speak, this.notesBtn, this.transcriptBox);
+    this.panel.append(header, statusRow, this.flashEl, body);
     this.render();
   }
 
-  private buildLangSelect(selected: string): HTMLSelectElement {
+  /** A select with optional leading options, then every language. */
+  private buildSelect(leading: [string, string][], selected: string, exclude?: string): HTMLSelectElement {
     const sel = document.createElement("select");
-    for (const lang of LANGUAGES) {
+    this.fillSelect(sel, leading, selected, exclude);
+    return sel;
+  }
+
+  private fillSelect(sel: HTMLSelectElement, leading: [string, string][], selected: string, exclude?: string): void {
+    sel.textContent = "";
+    const all: [string, string][] = [...leading, ...LANGUAGES.filter((l) => l.code !== exclude).map((l): [string, string] => [l.code, l.name])];
+    for (const [value, label] of all) {
       const opt = document.createElement("option");
-      opt.value = lang.code;
-      opt.textContent = lang.name;
-      if (lang.code === selected) opt.selected = true;
+      opt.value = value;
+      opt.textContent = label;
       sel.appendChild(opt);
     }
-    sel.addEventListener("change", () => {
-      this.sourceLang = this.sourceSelect.value;
-      this.targetLang = this.targetSelect.value;
-      chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
-    });
-    return sel;
+    sel.value = all.some(([v]) => v === selected) ? selected : all[0][0];
+  }
+
+  /** "Others hear me in" never offers my own language (that's just my voice). */
+  private fillSpeakOptions(): void {
+    this.fillSelect(this.speakSelect, [[AUTO, "Auto — match the room"]], this.speakLang, this.myLang);
+    if (this.speakSelect.value !== this.speakLang) {
+      this.speakLang = this.speakSelect.value;
+      chrome.storage.sync.set({ speakLang: this.speakLang });
+    }
+  }
+
+  private wrap(sel: HTMLSelectElement): HTMLDivElement {
+    const box = this.el("div", "langs");
+    box.appendChild(sel);
+    return box;
   }
 
   /* ── Expand / Collapse ── */
@@ -760,15 +852,6 @@ class InterpreterWidget {
       this.panel.remove();
       this.anchor.appendChild(this.fab);
     }
-  }
-
-  private swapLangs(): void {
-    const tmp = this.sourceSelect.value;
-    this.sourceSelect.value = this.targetSelect.value;
-    this.targetSelect.value = tmp;
-    this.sourceLang = this.sourceSelect.value;
-    this.targetLang = this.targetSelect.value;
-    chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
   }
 
   /* ── Messaging helpers ── */
@@ -809,9 +892,9 @@ class InterpreterWidget {
       return;
     }
     this.sourceLang = this.sourceSelect.value;
-    this.targetLang = this.targetSelect.value;
-    chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.targetLang });
-    chrome.storage.sync.get(["modes", "includeMic", "sttProvider", "ttsProvider"], (d) => {
+    this.myLang = this.myLangSelect.value;
+    chrome.storage.sync.set({ sourceLang: this.sourceLang, targetLang: this.myLang });
+    chrome.storage.sync.get(["modes", "includeMic", "sttProvider", "ttsProvider", "originalAudio"], (d) => {
       const modes: Modes = d.modes && typeof d.modes.translate === "boolean" ? d.modes : this.modes;
       this.entries = [];
       this.partials = {};
@@ -821,11 +904,12 @@ class InterpreterWidget {
           type: "start-capture",
           target: "background",
           sourceLang: this.sourceLang,
-          targetLang: this.targetLang,
+          targetLang: this.myLang,
           modes,
           includeMic: d.includeMic !== false && modes.notes, // on unless turned off in the popup
           sttProvider: d.sttProvider || null,
           ttsProvider: modes.translate ? d.ttsProvider || null : null,
+          originalAudio: d.originalAudio === "muted" ? "muted" : "quiet",
         },
         (res) => {
           if (res && res.success === false) {
@@ -843,10 +927,10 @@ class InterpreterWidget {
       return;
     }
     this.outgoingError = "";
-    this.sourceLang = this.sourceSelect.value;
-    this.targetLang = this.targetSelect.value;
+    this.myLang = this.myLangSelect.value;
+    this.speakLang = this.speakSelect.value;
     this.send(
-      { type: "start-mic-translation", target: "background", sourceLang: this.sourceLang, targetLang: this.targetLang },
+      { type: "start-mic-translation", target: "background", myLang: this.myLang, speakLang: this.speakLang },
       (res) => {
         if (res && res.success === false) {
           this.outgoingError = res.error || "Failed to start voice translation";
@@ -878,7 +962,7 @@ class InterpreterWidget {
         } else {
           this.partials[msg.source] = undefined;
           if (!msg.segmentId || !this.entries.some((e) => e.segmentId === msg.segmentId)) {
-            this.entries.push({ key: ++this.entryCounter, source: msg.source, speaker: msg.speaker, orig: msg.text, trans: "", segmentId: msg.segmentId });
+            this.entries.push({ key: ++this.entryCounter, source: msg.source, speaker: msg.speaker, orig: msg.text, trans: "", lang: msg.language, segmentId: msg.segmentId });
             this.entries = this.entries.slice(-MAX_ENTRIES * 3);
           }
         }
@@ -957,10 +1041,9 @@ class InterpreterWidget {
     this.waveformEl.className = `p-waveform${s.isCapturing ? " active" : ""}`;
     this.waveformEl.querySelector(".wf")?.classList.toggle("active", s.isCapturing);
 
-    const busy = s.isCapturing || s.isMicTranslating || s.status === "connecting";
-    this.sourceSelect.disabled = busy;
-    this.targetSelect.disabled = busy;
-    this.swapBtn.disabled = busy;
+    const listening = s.isCapturing || s.status === "connecting";
+    this.myLangSelect.disabled = listening || s.isMicTranslating;
+    this.sourceSelect.disabled = listening;
 
     if (s.isCapturing) {
       this.actionBtn.className = "action-btn stop";
@@ -968,24 +1051,31 @@ class InterpreterWidget {
       this.actionBtn.disabled = false;
     } else {
       this.actionBtn.className = "action-btn start";
-      this.actionBtn.innerHTML = `${SVG_PLAY}<span>${s.status === "connecting" ? "Starting…" : `Start ${what}`}</span>`;
+      this.actionBtn.innerHTML = `${SVG_PLAY}<span>${s.status === "connecting" ? "Starting…" : activeModes.translate ? `Hear everyone in ${this.esc(langName(this.myLang))}` : `Start ${what}`}</span>`;
       this.actionBtn.disabled = s.status === "connecting";
     }
 
     // Your voice → the other participants (Meet only)
     const o = s.outgoingStatus;
+    let voiceText = this.outgoingError;
+    if (o === "starting") voiceText = "Connecting your voice…";
+    else if (o === "error") voiceText = this.outgoingError || "Voice translation failed";
+    else if (o === "on") {
+      voiceText = s.outgoingLang
+        ? `Others hear you in ${langName(s.outgoingLang)}`
+        : s.speakLang === AUTO && !s.isCapturing
+          ? "Others hear your own voice — start “What I hear” so Distill learns the room's language"
+          : s.speakLang === AUTO
+            ? `Others hear your own voice — the room speaks ${langName(this.myLang)} or hasn't said enough yet`
+            : "Others hear your own voice";
+    }
     this.micStatusDot.className = `s-dot${o === "on" ? " capturing" : o === "starting" ? " connected" : o === "error" ? " error" : ""}`;
-    this.micStatusLabel.textContent =
-      o === "on"
-        ? "Others hear you translated"
-        : o === "starting"
-          ? "Connecting your voice…"
-          : o === "error"
-            ? this.outgoingError || "Voice translation failed"
-            : this.outgoingError;
+    this.micStatusLabel.textContent = voiceText;
+    this.micStatusRow.classList.toggle("hidden", !voiceText);
+    this.micHint.hidden = s.isMicTranslating;
     this.micActionBtn.className = s.isMicTranslating ? "action-btn mic-stop" : "action-btn mic-start";
-    this.micActionBtn.innerHTML = `${SVG_MIC}<span>${s.isMicTranslating ? "Stop translating my voice" : "Translate my voice"}</span>`;
-    this.micActionBtn.title = "Speak in your language; other participants hear the meeting language.";
+    this.micActionBtn.innerHTML = `${SVG_MIC}<span>${s.isMicTranslating ? "Stop — others hear my own voice" : "Translate my voice"}</span>`;
+    this.micActionBtn.title = "Speak your language; everyone in the call hears the language chosen above.";
 
     this.renderTranscript();
   }
@@ -1004,7 +1094,8 @@ class InterpreterWidget {
     let html = "";
     for (const e of this.entries.slice(-MAX_ENTRIES)) {
       const spk = who(e.source, e.speaker);
-      html += `<div class="t-entry"><div class="t-source ${spk === "me" ? "me" : "incoming"}">${this.esc(speakerLabel(spk))}</div>`;
+      const chip = e.lang && !sameLanguage(e.lang, this.myLang) ? `<span class="t-lang">${this.esc(langShort(e.lang))}</span>` : "";
+      html += `<div class="t-entry"><div class="t-source ${spk === "me" ? "me" : "incoming"}">${this.esc(speakerLabel(spk))}${chip}</div>`;
       if (e.orig) html += `<div class="t-orig">${this.esc(e.orig)}</div>`;
       if (e.trans) html += `<div class="t-trans">${this.esc(e.trans)}</div>`;
       html += `</div>`;
@@ -1030,15 +1121,13 @@ class InterpreterWidget {
   }
 
   private loadSettings(): void {
-    chrome.storage.sync.get(["sourceLang", "targetLang", "modes"], (data) => {
-      if (data.sourceLang) {
-        this.sourceLang = data.sourceLang;
-        this.sourceSelect.value = data.sourceLang;
-      }
-      if (data.targetLang) {
-        this.targetLang = data.targetLang;
-        this.targetSelect.value = data.targetLang;
-      }
+    chrome.storage.sync.get(["sourceLang", "targetLang", "speakLang", "modes"], (data) => {
+      if (typeof data.targetLang === "string") this.myLang = this.myLangSelect.value = data.targetLang;
+      if (typeof data.sourceLang === "string") this.sourceLang = this.sourceSelect.value = data.sourceLang;
+      // Before "Others hear me in" existed, voice translation used the meeting language.
+      if (typeof data.speakLang === "string") this.speakLang = data.speakLang;
+      else if (typeof data.sourceLang === "string" && data.sourceLang !== AUTO) this.speakLang = data.sourceLang;
+      this.fillSpeakOptions();
       if (data.modes && typeof data.modes.translate === "boolean") this.modes = data.modes;
       this.render();
     });

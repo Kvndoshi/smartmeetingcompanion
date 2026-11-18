@@ -947,49 +947,6 @@ body:has(.app.dark) {
   color: var(--text-muted);
 }
 
-.mode-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.mode-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 11px 10px 32px;
-  border-radius: 10px;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-1);
-  cursor: pointer;
-  transition: border-color 0.2s ease, background 0.2s ease;
-}
-
-.mode-card.on {
-  border-color: var(--glass-border-focus);
-  background: var(--glass-2);
-}
-
-.mode-card input {
-  position: absolute;
-  left: 11px;
-  top: 12px;
-  accent-color: var(--ios-blue);
-}
-
-.mode-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.mode-desc {
-  font-size: 10.5px;
-  color: var(--text-secondary);
-  line-height: 1.35;
-}
-
 .check-row {
   display: flex;
   align-items: center;
@@ -1041,4 +998,184 @@ body:has(.app.dark) {
 .banner code {
   font-family: "JetBrains Mono", monospace;
   font-size: 10.5px;
+}
+
+/* ═══════════════════════════════════════════
+   Direction cards — What I hear / What they hear / Notes
+   ═══════════════════════════════════════════ */
+.my-lang {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.lang-select.boxed {
+  border: 1px solid var(--glass-border);
+  background-color: var(--glass-1);
+  padding: 7px 28px 7px 10px;
+  font-size: 12.5px;
+}
+
+.dir-card {
+  --dir-color: var(--ios-blue);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  border-left: 3px solid color-mix(in srgb, var(--dir-color) 45%, transparent);
+  background: var(--glass-1);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.dir-card.hear { --dir-color: #0a84ff; }
+.dir-card.speak { --dir-color: #bf5af2; }
+.dir-card.notes { --dir-color: var(--green); }
+
+.dir-card.on {
+  border-color: color-mix(in srgb, var(--dir-color) 55%, transparent);
+  border-left-color: var(--dir-color);
+  background: color-mix(in srgb, var(--dir-color) 9%, var(--glass-1));
+}
+
+.dir-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+div.dir-head { cursor: default; }
+
+.dir-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--dir-color);
+  background: color-mix(in srgb, var(--dir-color) 18%, transparent);
+}
+
+.dir-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.dir-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.dir-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.dir-sub {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+.dir-toggle {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--dir-color);
+  cursor: pointer;
+}
+
+.dir-card .check-row input { accent-color: var(--dir-color); }
+
+.field-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.dir-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--dir-color) 55%, transparent);
+  background: color-mix(in srgb, var(--dir-color) 16%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.dir-btn svg {
+  width: 14px;
+  height: 14px;
+  color: var(--dir-color);
+}
+
+.dir-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dir-color) 26%, transparent);
+}
+
+.dir-btn.active {
+  background: var(--dir-color);
+  color: #fff;
+}
+
+.dir-btn.active svg { color: #fff; }
+
+.dir-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dir-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.dir-status .dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.dir-status .dot.on { background: var(--green); }
+.dir-status .dot.starting { background: var(--amber); }
+.dir-status .dot.error { background: var(--red); }
+
+.lang-chip {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--glass-border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text-secondary);
+  vertical-align: 1px;
 }

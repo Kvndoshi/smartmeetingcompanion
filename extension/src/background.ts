@@ -2,9 +2,12 @@
 // Orchestrates popup / side panel / Meet widget ↔ offscreen capture ↔ backend WebSockets.
 //
 // Sockets (all to /ws/translate, see backend/services/session.py):
-//   tab       tab audio (other participants): transcription and/or translation
+//   tab       tab audio (other participants): "What I hear" translation and/or notes.
+//             They speak "auto" → the backend detects each speaker's language.
 //   mic       your microphone (notes mode, offscreen getUserMedia) → same meeting
-//   outgoing  Meet-only: your voice translated and injected into the call
+//   outgoing  Meet-only "What they hear": your voice translated and injected into
+//             the call. One language at a time (a participant sends one stream);
+//             "auto" follows the language the others speak (shared/roomLanguage.ts).
 //
 // State is mirrored to chrome.storage.session so a restarted service worker can
 // reconnect to the same meeting (the offscreen document keeps capturing).
@@ -21,6 +24,8 @@ import {
   type StartCaptureRequest,
   type UiMessage,
 } from "./shared/protocol";
+import { emptyRoom, observeRoom, type RoomState } from "./shared/roomLanguage";
+import { AUTO, sameLanguage } from "./utils/languages";
 
 const STATE_KEY = "distill-session";
 const MAX_PENDING_BYTES = 16000 * 2 * 15; // ≤ 15 s of audio buffered before the backend acks
@@ -128,6 +133,25 @@ class BackendSession {
     if (this.isOpen) this.ws!.send(JSON.stringify(payload));
   }
 
+  /**
+   * Re-send a freshly built config on the open socket (e.g. a new target
+   * language). Audio is buffered until the backend acks with `session` again.
+   */
+  async reconfigure(): Promise<void> {
+    if (!this.isOpen) {
+      this.connect();
+      return;
+    }
+    const ws = this.ws!;
+    this.ready = false;
+    try {
+      const config = await this.buildConfig();
+      if (this.ws === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(config));
+    } catch (err) {
+      console.error(`[BG:${this.label}] could not rebuild config`, err);
+    }
+  }
+
   waitFor(kinds: string[], timeoutMs: number): Promise<ServerMessage | null> {
     return new Promise((resolve) => {
       const waiter = { kinds, resolve };
@@ -194,7 +218,9 @@ class BackendSession {
 let tabSession: BackendSession | null = null;
 let micSession: BackendSession | null = null;
 let outgoingSession: BackendSession | null = null;
-let outgoing: { tabId: number; sourceLang: string; targetLang: string } | null = null;
+// "What they hear": I speak `myLang`; others hear `speakLang` ("auto" = match the room).
+let outgoing: { tabId: number; myLang: string; speakLang: string } | null = null;
+let room: RoomState = emptyRoom();
 let micPort: chrome.runtime.Port | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -239,7 +265,12 @@ function ensureRestored(): Promise<void> {
     restorePromise = (async () => {
       const saved = (await chrome.storage.session.get(STATE_KEY))[STATE_KEY] as SessionState | undefined;
       if (!saved) return;
-      state = { ...structuredClone(INITIAL_STATE), ...saved, isMicTranslating: false, outgoingStatus: "idle" };
+      state = { ...structuredClone(INITIAL_STATE), ...saved, isMicTranslating: false, outgoingStatus: "idle", outgoingLang: null };
+      if (saved.isMicTranslating) {
+        // The Meet page lost its link to us and went back to your own voice.
+        persist();
+        broadcast({ target: "ui", type: "warning", message: "Voice translation stopped — turn “Translate my voice” on again." });
+      }
       if (!state.isCapturing || tabSession) return;
       if (!(await hasOffscreenDocument())) {
         state = { ...state, isCapturing: false, status: "idle", captureStartedAt: null, micStatus: "idle" };
@@ -337,17 +368,60 @@ function openTabSession(): void {
 // What the backend accepted for the current tab session (null until the ack).
 let tabAck: { translate: boolean; tts: string | null } | null = null;
 
-/**
- * tabCapture mutes the tab. In translate mode that's intended — unless no
- * translated voice will play (no TTS provider, or same source/target language),
- * in which case the original audio is kept audible instead of silence.
- * Runs on the ack and once capture is live, whichever comes last.
- */
-function syncPassthrough(): void {
-  if (!state.isCapturing || !state.modes.translate || !tabAck) return;
-  if (!tabAck.translate || !tabAck.tts) {
-    void sendToOffscreen({ type: "set-passthrough", target: "offscreen", enabled: true }).catch(() => {});
+// ── Hearing the original voices (tabCapture mutes the tab) ──────────
+//
+// Translating: voices sit quietly under their translation ("quiet") or are
+// silent ("muted"). With They speak = Auto, someone already speaking your
+// language is heard at full volume and isn't translated at all — the volume
+// drops only while foreign speech is detected (and while translation plays,
+// which the offscreen document handles itself).
+const QUIET_LEVEL = 0.15;
+const FOREIGN_HOLD_MS = 2500;
+let foreignSpeechUntil = 0;
+let foreignTimer: ReturnType<typeof setTimeout> | null = null;
+let sentOriginalLevel: number | null = null;
+
+function duckLevel(): number {
+  return state.originalAudio === "muted" ? 0 : QUIET_LEVEL;
+}
+
+function originalLevel(): number {
+  if (!state.modes.translate) return 1;
+  if (tabAck && (!tabAck.translate || !tabAck.tts)) return 1; // no translated voice will play
+  if (state.sourceLang !== AUTO) return duckLevel();
+  return Date.now() < foreignSpeechUntil ? duckLevel() : 1;
+}
+
+/** Runs on the ack, once capture is live, and whenever detected languages change. */
+function syncOriginalLevel(): void {
+  if (!state.isCapturing) return;
+  const level = originalLevel();
+  if (level === sentOriginalLevel) return;
+  sentOriginalLevel = level;
+  void sendToOffscreen({ type: "set-original-level", target: "offscreen", level, duckLevel: duckLevel() }).catch(() => {});
+}
+
+/** Auto mode: a tab transcript (partial or final) told us which language is being spoken. */
+function noteSpokenLanguage(language: string | null | undefined): void {
+  if (!language || state.sourceLang !== AUTO || !state.modes.translate) return;
+  if (sameLanguage(language, state.targetLang)) {
+    foreignSpeechUntil = 0;
+  } else {
+    foreignSpeechUntil = Date.now() + FOREIGN_HOLD_MS;
+    if (foreignTimer) clearTimeout(foreignTimer);
+    foreignTimer = setTimeout(syncOriginalLevel, FOREIGN_HOLD_MS + 50);
   }
+  syncOriginalLevel();
+}
+
+/** Auto "Others hear me in": learn which language the other participants speak. */
+function noteRoomSegment(language: string | null | undefined, text: string): void {
+  const next = observeRoom(room, { lang: language, text, t: Date.now() }, state.targetLang);
+  const changed = next.current !== room.current;
+  room = next;
+  if (!changed) return;
+  setState({ roomLang: room.current });
+  applyOutgoingTarget();
 }
 
 function handleTabMessage(msg: ServerMessage, session: BackendSession): void {
@@ -364,10 +438,12 @@ function handleTabMessage(msg: ServerMessage, session: BackendSession): void {
       });
       if (state.includeMic && state.modes.notes && !micSession && !state.isMicTranslating) void startNotesMic();
       tabAck = { translate: msg.translate, tts: msg.tts_provider };
-      syncPassthrough();
+      syncOriginalLevel();
       syncOutgoingMeeting();
       break;
     case "transcript":
+      noteSpokenLanguage(msg.language);
+      if (msg.is_final) noteRoomSegment(msg.language, msg.text);
       broadcast({
         target: "ui",
         type: "transcript",
@@ -375,6 +451,7 @@ function handleTabMessage(msg: ServerMessage, session: BackendSession): void {
         text: msg.text,
         isFinal: msg.is_final,
         speaker: msg.speaker,
+        language: msg.language ?? null,
         segmentId: msg.segment_id,
         startMs: msg.start_ms,
         meetingId: state.meetingId,
@@ -389,6 +466,7 @@ function handleTabMessage(msg: ServerMessage, session: BackendSession): void {
         text: msg.text,
         isFinal: msg.type === "translated_text",
         speaker: msg.speaker,
+        language: msg.language ?? null,
         segmentId: msg.type === "translated_text" ? msg.segment_id : undefined,
         meetingId: state.meetingId,
       });
@@ -469,8 +547,9 @@ async function startNotesMic(): Promise<void> {
     "mic",
     async () => ({
       type: "config",
-      source_lang: state.sourceLang,
-      target_lang: state.sourceLang,
+      // Your own voice: you speak your language, whatever the others speak.
+      source_lang: state.targetLang,
+      target_lang: state.targetLang,
       mode: { translate: false, transcribe: true },
       source: "mic",
       meeting_id: state.meetingId,
@@ -487,6 +566,7 @@ async function startNotesMic(): Promise<void> {
             text: msg.text,
             isFinal: msg.is_final,
             speaker: "me",
+            language: msg.language ?? null,
             segmentId: msg.segment_id,
             startMs: msg.start_ms,
             meetingId: state.meetingId,
@@ -576,9 +656,14 @@ async function startCapture(req: StartCaptureRequest, senderTabId?: number): Pro
   const info = await tabInfo(tabId);
   const gen = ++captureGen;
 
+  room = emptyRoom();
+  foreignSpeechUntil = 0;
+  sentOriginalLevel = null;
   setState({
-    sourceLang: req.sourceLang,
+    sourceLang: req.sourceLang || AUTO,
     targetLang: req.targetLang,
+    originalAudio: req.originalAudio === "muted" ? "muted" : "quiet",
+    roomLang: null,
     modes,
     includeMic: !!req.includeMic && modes.notes,
     sttProvider: req.sttProvider || null,
@@ -600,12 +685,15 @@ async function startCapture(req: StartCaptureRequest, senderTabId?: number): Pro
     captureEverReady = false;
     tabAck = null;
     openTabSession(); // audio is buffered until the backend acks the config
+    sentOriginalLevel = originalLevel();
     const res = await sendToOffscreen({
       type: "start-capture",
       target: "offscreen",
       streamId,
       outputDeviceId: state.outputDeviceId,
-      passthrough: !modes.translate, // tabCapture mutes the tab; keep it audible when only taking notes
+      // tabCapture mutes the tab: full volume when only taking notes, see originalLevel().
+      originalLevel: sentOriginalLevel,
+      duckLevel: duckLevel(),
     });
     if (!res?.success) throw new Error(res?.error || "Tab capture failed");
     if (gen !== captureGen) throw new Error(state.lastError || "Capture was stopped while starting");
@@ -622,8 +710,9 @@ async function startCapture(req: StartCaptureRequest, senderTabId?: number): Pro
     captureStartedAt: Date.now(),
     status: tabSession?.ready ? "capturing" : "connecting", // the session ack may already have arrived
   });
-  syncPassthrough();
+  syncOriginalLevel();
   syncOutgoingMeeting();
+  applyOutgoingTarget(); // a fixed "They speak" now defines what "auto" voice translation targets
 }
 
 async function stopCapture(endMeeting = true, error?: string): Promise<void> {
@@ -642,14 +731,19 @@ async function stopCapture(endMeeting = true, error?: string): Promise<void> {
   if (state.isMicTranslating && outgoing?.tabId === state.tabId) await stopMicTranslation();
   if (tab) await tab.stop(endMeeting);
   await removeOffscreenDocument();
+  room = emptyRoom();
+  if (foreignTimer) clearTimeout(foreignTimer);
+  foreignTimer = null;
   setState({
     isCapturing: false,
     status: error ? "error" : "idle",
     captureStartedAt: null,
     micStatus: "idle",
     tabId: null,
+    roomLang: null,
     lastError: error ?? null,
   });
+  applyOutgoingTarget(); // voice translation in another tab: no room to follow any more
 }
 
 // ── Meet outgoing translation (your voice → other participants) ─────
@@ -662,27 +756,69 @@ async function waitForMeetingId(timeoutMs: number): Promise<string | null> {
   return state.meetingId;
 }
 
-async function startMicTranslation(sourceLang: string, targetLang: string, senderTabId?: number): Promise<void> {
+const MEET_URL = /^https:\/\/meet\.google\.com\//i;
+
+/**
+ * Language the others hear me in right now; null = my own voice.
+ * "auto" follows the room: a fixed "They speak" language when one is set,
+ * otherwise the language detected in the other participants' speech.
+ */
+function effectiveSpeakLang(): string | null {
+  if (!outgoing) return null;
+  let lang: string | null = outgoing.speakLang;
+  if (lang === AUTO) {
+    const listening = state.isCapturing && state.tabId === outgoing.tabId;
+    lang = !listening ? null : state.sourceLang !== AUTO ? state.sourceLang : room.current;
+  }
+  return lang && !sameLanguage(lang, outgoing.myLang) ? lang : null;
+}
+
+/** Tell the Meet page whether the call gets your real voice (own voice) or only the translation. */
+function sendVoiceMix(): void {
+  if (!outgoing) return;
+  void chrome.tabs.sendMessage(outgoing.tabId, { type: "mic-interceptor-mix", mic: state.outgoingLang === null }).catch(() => {});
+}
+
+/** Re-target voice translation (new choice, room changed, capture started/stopped). */
+function applyOutgoingTarget(): void {
+  if (!outgoing || !outgoingSession) return;
+  const lang = effectiveSpeakLang();
+  if (lang === state.outgoingLang) return;
+  setState({ outgoingLang: lang });
+  sendVoiceMix();
+  void outgoingSession.reconfigure(); // same socket; the backend switches language (or to transcribe-only)
+}
+
+async function startMicTranslation(
+  myLang: string,
+  speakLang: string,
+  requestedTabId?: number,
+  senderTabId?: number
+): Promise<void> {
   await ensureRestored();
   if (outgoingSession) await stopMicTranslation();
-  // The widget lives in the Meet tab that asked; prefer it over whatever tab is being captured.
-  const tabId = senderTabId ?? state.tabId ?? (await resolveCaptureTabId());
-  if (!tabId) throw new Error("Open the Google Meet tab first");
-  outgoing = { tabId, sourceLang, targetLang };
+  // The widget lives in the Meet tab that asked; the popup names its tab.
+  const tabId = requestedTabId ?? senderTabId ?? state.tabId ?? (await resolveCaptureTabId());
+  if (!tabId) throw new Error("Open your Google Meet call first");
+  const url = (await tabInfo(tabId)).url;
+  if (url && !MEET_URL.test(url)) throw new Error("“Translate my voice” works in Google Meet — open your Meet call tab first");
+  outgoing = { tabId, myLang, speakLang: speakLang || AUTO };
   if (micSession) await stopNotesMic(); // the outgoing socket transcribes your voice instead
-  setState({ isMicTranslating: true, outgoingStatus: "starting" });
+  setState({ isMicTranslating: true, outgoingStatus: "starting", speakLang: outgoing.speakLang, outgoingLang: effectiveSpeakLang() });
 
+  const mine = outgoing;
   outgoingSession = new BackendSession(
     "outgoing",
     async () => {
       const notes = state.isCapturing && state.modes.notes && state.tabId === tabId;
       const meetingId = notes ? await waitForMeetingId(5000) : null;
       const info = await tabInfo(tabId);
-      // You speak `targetLang` (your language); others hear `sourceLang`.
+      // You speak your language; others hear `outgoingLang`. Own voice → target = your
+      // language, which the backend treats as transcribe-only (no translation, no TTS).
       return {
         type: "config",
-        source_lang: targetLang,
-        target_lang: sourceLang,
+        source_lang: mine.myLang,
+        target_lang: (outgoing === mine ? state.outgoingLang : null) ?? mine.myLang,
         mode: { translate: true, transcribe: !!meetingId },
         source: "mic",
         meeting_id: meetingId,
@@ -695,9 +831,9 @@ async function startMicTranslation(sourceLang: string, targetLang: string, sende
     {
       onMessage: (msg, session) => {
         if (msg.type === "transcript")
-          broadcast({ target: "ui", type: "transcript", source: "mic", text: msg.text, isFinal: msg.is_final, speaker: "me", segmentId: msg.segment_id, startMs: msg.start_ms, meetingId: msg.segment_id ? state.meetingId : null });
+          broadcast({ target: "ui", type: "transcript", source: "mic", text: msg.text, isFinal: msg.is_final, speaker: "me", language: msg.language ?? null, segmentId: msg.segment_id, startMs: msg.start_ms, meetingId: msg.segment_id ? state.meetingId : null });
         else if (msg.type === "translated_text_partial" || msg.type === "translated_text")
-          broadcast({ target: "ui", type: "translation", source: "mic", text: msg.text, isFinal: msg.type === "translated_text", speaker: "me", segmentId: msg.type === "translated_text" ? msg.segment_id : undefined, meetingId: state.meetingId });
+          broadcast({ target: "ui", type: "translation", source: "mic", text: msg.text, isFinal: msg.type === "translated_text", speaker: "me", language: msg.language ?? null, segmentId: msg.type === "translated_text" ? msg.segment_id : undefined, meetingId: state.meetingId });
         else if (msg.type === "warning") broadcast({ target: "ui", type: "warning", message: `Your voice: ${msg.message}` });
         else if (msg.type === "error") {
           reportError("outgoing", `Your voice: ${msg.message}`, msg.code);
@@ -711,6 +847,7 @@ async function startMicTranslation(sourceLang: string, targetLang: string, sende
     }
   );
   outgoingSession.connect();
+  sendVoiceMix(); // the interceptor keeps it and applies it when its pipeline is built
 
   try {
     await chrome.tabs.sendMessage(tabId, { type: "mic-interceptor-activate" });
@@ -718,6 +855,13 @@ async function startMicTranslation(sourceLang: string, targetLang: string, sende
     await stopMicTranslation("error");
     throw new Error("Couldn't reach the Meet page — reload the Google Meet tab and try again");
   }
+}
+
+function setSpeakLanguage(speakLang: string): void {
+  const value = speakLang || AUTO;
+  if (outgoing) outgoing.speakLang = value;
+  setState({ speakLang: value });
+  applyOutgoingTarget();
 }
 
 /**
@@ -756,7 +900,7 @@ async function stopMicTranslation(status: "idle" | "error" = "idle"): Promise<vo
     /* already gone */
   }
   if (session) await session.stop(false);
-  setState({ isMicTranslating: false, outgoingStatus: status }, [tabId]); // `outgoing` is already cleared
+  setState({ isMicTranslating: false, outgoingStatus: status, outgoingLang: null }, [tabId]); // `outgoing` is already cleared
   if (state.isCapturing && state.includeMic && state.modes.notes && !micSession) void startNotesMic();
 }
 
@@ -764,7 +908,10 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "mic-capture") return;
   micPort = port;
   port.onMessage.addListener((msg) => {
-    if (msg?.type === "mic-audio-data" && Array.isArray(msg.data)) outgoingSession?.sendAudio(toArrayBuffer(msg.data));
+    if (msg?.type !== "mic-audio-data" || !Array.isArray(msg.data) || !outgoingSession) return;
+    // Own voice and no notes: nothing to translate or transcribe — don't stream it.
+    if (state.outgoingLang === null && !outgoingSession.meetingId) return;
+    outgoingSession.sendAudio(toArrayBuffer(msg.data));
   });
   port.onDisconnect.addListener(() => {
     if (micPort !== port) return; // an older port from a previous activation
@@ -815,15 +962,26 @@ async function handle(message: BackgroundRequest | Record<string, any>, sender: 
         await sendToOffscreen({ type: "set-output-device", target: "offscreen", deviceId: message.deviceId || null }).catch(() => {});
       return { success: true };
     case "start-mic-translation":
-      await startMicTranslation(message.sourceLang, message.targetLang, sender.tab?.id);
+      try {
+        await startMicTranslation(message.myLang, message.speakLang, message.tabId, sender.tab?.id);
+      } catch (err) {
+        reportError("outgoing", (err as Error).message, undefined, [sender.tab?.id, message.tabId]);
+        throw err;
+      }
+      return { success: true, state };
+    case "set-speak-language":
+      await ensureRestored();
+      setSpeakLanguage(message.speakLang);
       return { success: true, state };
     case "stop-mic-translation":
       await stopMicTranslation();
       return { success: true, state };
     case "outgoing-status":
       if (!outgoingSession) return undefined;
-      if (message.ok) setState({ outgoingStatus: "on" });
-      else {
+      if (message.ok) {
+        setState({ outgoingStatus: "on" });
+        sendVoiceMix();
+      } else {
         reportError("outgoing", message.message || "Couldn't attach to your Meet microphone");
         await stopMicTranslation("error");
       }

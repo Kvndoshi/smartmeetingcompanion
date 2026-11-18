@@ -1,9 +1,9 @@
 flowchart TB
     subgraph Browser["Chrome / Edge"]
         TAB["🎙️ Meeting tab<br/>Meet · Teams · Zoom web · YouTube"]
-        POP["Popup<br/>modes · languages · providers"]
+        POP["Popup<br/>My language · What I hear · What they hear · notes"]
         PANEL["Side panel<br/>Live · Summary · Ask · Meetings"]
-        WIDGET["Meet widget<br/>+ voice interceptor (WebRTC)"]
+        WIDGET["Meet widget<br/>+ voice interceptor (WebRTC)<br/>translation or own-voice mix"]
         SW["Service worker<br/>sessions · state · broadcasts"]
         OFS["Offscreen document<br/>tabCapture + mic → PCM 16k<br/>translated playback"]
         OUT["🎧 Output device"]
@@ -20,8 +20,8 @@ flowchart TB
     end
 
     subgraph STT["Speech-to-text"]
-        SONIOX["Soniox<br/>diarization + translation"]
-        DG["Deepgram<br/>diarization"]
+        SONIOX["Soniox<br/>diarization + translation + language ID"]
+        DG["Deepgram<br/>diarization + language ID"]
         SMX["Speechmatics"]
         AZS["Azure Speech"]
     end

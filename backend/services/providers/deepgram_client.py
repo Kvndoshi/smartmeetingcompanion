@@ -60,9 +60,13 @@ class DeepgramClient:
         self._closed_event = asyncio.Event()
         self._last_audio_at = 0.0
         self._words: list[dict[str, Any]] = []  # finalized words of the current utterance
+        self._alt_language: str | None = None  # `languages[0]` of the latest result (multi mode)
 
     def build_params(self) -> dict[str, str]:
         lang = _base(self.language) or "en"
+        multi = lang in {"auto", "multi"}
+        # Deepgram recommends endpointing=100 for multilingual code-switching.
+        endpointing = os.getenv("DEEPGRAM_ENDPOINTING_MS", "").strip() or ("100" if multi else "300")
         params = {
             "model": self.model,
             "encoding": "linear16",
@@ -71,9 +75,9 @@ class DeepgramClient:
             "interim_results": "true",
             "punctuate": "true",
             "smart_format": "true",
-            "endpointing": os.getenv("DEEPGRAM_ENDPOINTING_MS", "300").strip() or "300",
+            "endpointing": endpointing,
             "utterance_end_ms": os.getenv("DEEPGRAM_UTTERANCE_END_MS", "1200").strip() or "1200",
-            "language": "multi" if lang in {"auto", "multi"} else lang,
+            "language": "multi" if multi else lang,
         }
         # diarize=true is deprecated in favour of diarize_model (Nov 2026 docs).
         diarize = os.getenv("DEEPGRAM_DIARIZE", "diarize_model=latest").strip()
@@ -197,6 +201,18 @@ class DeepgramClient:
             return str(spk + 1)  # 0-based → "1", "2", …
         return None
 
+    def _language(self, words: list[dict[str, Any]]) -> str | None:
+        """Dominant detected language of `words` (multi mode), else the result-level hint."""
+        counts: dict[str, int] = {}
+        for w in words:
+            lang = w.get("language")
+            if isinstance(lang, str) and lang:
+                base = _base(lang)
+                counts[base] = counts.get(base, 0) + 1
+        if counts:
+            return max(counts, key=counts.get)  # type: ignore[arg-type]
+        return self._alt_language
+
     async def handle_message(self, msg: dict[str, Any]) -> None:
         kind = msg.get("type")
         if kind == "Error":
@@ -211,6 +227,9 @@ class DeepgramClient:
         if not alts:
             return
         alt = alts[0]
+        languages = alt.get("languages")
+        if isinstance(languages, list) and languages and isinstance(languages[0], str):
+            self._alt_language = _base(languages[0])
         words = [w for w in alt.get("words") or [] if self._word_text(w)]
         if msg.get("is_final"):
             for word in words:
@@ -221,7 +240,10 @@ class DeepgramClient:
             if msg.get("speech_final"):
                 await self._flush()
             elif self._words and self.on_transcript:
-                await self.on_transcript(self._joined(self._words), False, speaker=self._speaker(self._words[-1]))
+                await self.on_transcript(
+                    self._joined(self._words), False, speaker=self._speaker(self._words[-1]),
+                    language=self._language(self._words),
+                )
             return
         interim = " ".join(self._word_text(w) for w in words) or str(alt.get("transcript") or "")
         if not interim.strip() and not self._words:
@@ -229,7 +251,7 @@ class DeepgramClient:
         text = (self._joined(self._words) + " " + interim).strip() if self._words else interim.strip()
         speaker = self._speaker(words[0]) if words else (self._speaker(self._words[-1]) if self._words else None)
         if self.on_transcript:
-            await self.on_transcript(text, False, speaker=speaker)
+            await self.on_transcript(text, False, speaker=speaker, language=self._language(self._words + words))
 
     def _joined(self, words: list[dict[str, Any]]) -> str:
         return " ".join(self._word_text(w) for w in words).strip()
@@ -251,4 +273,5 @@ class DeepgramClient:
                 speaker=speaker,
                 start_ms=int(float(start) * 1000) if isinstance(start, (int, float)) else None,
                 end_ms=int(float(end) * 1000) if isinstance(end, (int, float)) else None,
+                language=self._language(words),
             )

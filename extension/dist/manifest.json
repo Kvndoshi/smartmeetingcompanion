@@ -35,7 +35,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/meet-interceptor.ts-D52wtWYo.js"
+        "assets/meet-interceptor.ts-Cgcp7BJn.js"
       ],
       "matches": [
         "https://meet.google.com/*"
@@ -45,7 +45,7 @@
     },
     {
       "js": [
-        "assets/meet-bridge.ts-KrN0GrcH.js"
+        "assets/meet-bridge.ts-BsuYcRbi.js"
       ],
       "matches": [
         "https://meet.google.com/*"
@@ -54,7 +54,7 @@
     },
     {
       "js": [
-        "assets/meet-widget.ts-loader-Op5_asMQ.js"
+        "assets/meet-widget.ts-loader-Dw3k7VW9.js"
       ],
       "matches": [
         "https://meet.google.com/*"
@@ -68,11 +68,10 @@
         "https://meet.google.com/*"
       ],
       "resources": [
-        "assets/meet-interceptor.ts-D52wtWYo.js",
-        "assets/meet-bridge.ts-KrN0GrcH.js",
-        "assets/languages-l3NF9G8N.js",
-        "assets/protocol-YEH95tgC.js",
-        "assets/meet-widget.ts-DyGlagzi.js"
+        "assets/meet-interceptor.ts-Cgcp7BJn.js",
+        "assets/meet-bridge.ts-BsuYcRbi.js",
+        "assets/protocol-DxiIV_nh.js",
+        "assets/meet-widget.ts-D7qlRIdk.js"
       ],
       "use_dynamic_url": false
     }

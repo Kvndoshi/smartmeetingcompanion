@@ -5,16 +5,20 @@ the meeting) → optional translation (native or text translator) → optional
 TTS → WAV audio back to the extension.
 
 Protocol (client → server):
-  {"type":"config", source_lang, target_lang, mode:{translate,transcribe},
-   source:"tab"|"mic", meeting_id?, tab_url?, tab_title?, stt_provider?,
-   tts_provider?, translator?}
+  {"type":"config", source_lang ("auto" = detect per segment), target_lang,
+   mode:{translate,transcribe}, source:"tab"|"mic", meeting_id?, tab_url?,
+   tab_title?, stt_provider?, tts_provider?, translator?}
+  A later config on the same socket re-configures it (e.g. a new target).
   binary PCM chunks
   {"type":"stop", end_meeting?: bool} · {"type":"end_meeting"} · {"type":"ping"}
 
 Server → client:
-  {"type":"session", meeting_id, stt_provider, tts_provider, translator, ...}
-  {"type":"transcript", text, is_final, speaker, source, segment_id?, start_ms?}
-  {"type":"translated_text_partial"|"translated_text", text, segment_id?, ...}
+  {"type":"session", meeting_id, stt_provider, tts_provider, translator,
+   source_lang, target_lang, auto_language, ...}
+  {"type":"transcript", text, is_final, speaker, source, language, segment_id?, start_ms?}
+  {"type":"translated_text_partial"|"translated_text", text, language, segment_id?, ...}
+  `language` = ISO base code of what was said (null when unknown). Segments
+  already in target_lang are neither translated nor spoken.
   binary WAV audio · {"type":"stopped"} · {"type":"meeting_ended", meeting_id}
   {"type":"error", message, code} · {"type":"warning", message} · {"type":"pong"}
 """
@@ -49,6 +53,11 @@ def _base(code: str) -> str:
     return code.split("-")[0].lower()
 
 
+def _norm(text: str) -> str:
+    """Comparable form of a sentence: case-folded word characters only."""
+    return re.sub(r"[\W_]+", "", text.casefold())
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(float(os.getenv(name, "").strip() or default))
@@ -63,6 +72,7 @@ class LiveSession:
         self.open = True
         self.source_lang = "en"
         self.target_lang = "es"
+        self.auto_source = False  # source_lang "auto": the provider identifies each segment's language
         self.translate = True
         self.transcribe = True
         self.source = "tab"
@@ -81,6 +91,8 @@ class LiveSession:
         self.worker: asyncio.Task[None] | None = None
         self._pending: list[tuple[str, int | None]] = []
         self._pending_speaker: str | None = None
+        self._pending_language: str | None = None
+        self._last_final_text = ""
         self._flush_task: asyncio.Task[None] | None = None
         self._last_segment_id: int | None = None
         self._stt_t0: float | None = None
@@ -167,7 +179,7 @@ class LiveSession:
         if self.stt is None:
             if not self._warned_no_stt:
                 self._warned_no_stt = True
-                logger.info("Dropping audio received before a successful config")
+                logger.info("Dropping audio: no speech-to-text stream (not configured, or nothing to do)")
             return
         if not self.stt.is_connected:
             await self._maybe_reconnect()
@@ -180,17 +192,35 @@ class LiveSession:
     async def _configure(self, msg: dict[str, Any]) -> None:
         await self._close_stt()
         await self._close_aux()
+        # A re-config (e.g. a new target language) must not speak queued text in the old one.
+        self._pending = []
+        self._drain_queue()
         self.config = msg
         self.source_lang = _lang(msg.get("source_lang"), "en")
         self.target_lang = _lang(msg.get("target_lang"), "es")
+        self.auto_source = registry.is_auto_language(self.source_lang)
+        if self.auto_source:
+            self.source_lang = "auto"
         mode = msg.get("mode") if isinstance(msg.get("mode"), dict) else {}
         self.translate = bool(mode.get("translate", True))
         self.transcribe = bool(mode.get("transcribe", True))
         self.source = "mic" if msg.get("source") == "mic" else "tab"
-        want_translation = self.translate and _base(self.source_lang) != _base(self.target_lang)
+        # With auto-detect every segment may be in another language; same-language
+        # segments are skipped one by one (see _same_as_target).
+        want_translation = self.translate and (
+            self.auto_source or _base(self.source_lang) != _base(self.target_lang)
+        )
+
+        if not want_translation and not self.transcribe:
+            # Nothing to translate or transcribe, e.g. "others hear my own voice" with
+            # notes off. Don't hold a provider connection open; a later config wakes it.
+            await self._configure_idle()
+            return
 
         try:
-            stt_id = registry.resolve("stt", msg.get("stt_provider"))
+            stt_id = registry.resolve(
+                "stt", msg.get("stt_provider"), language=self.source_lang, require_auto=self.auto_source
+            )
         except ProviderConfigError as exc:
             await self.send_error(str(exc), code="provider_config")
             return
@@ -272,10 +302,40 @@ class LiveSession:
                 "transcribe": self.transcribe,
                 "source": self.source,
                 "diarization": spec.diarization,
+                "source_lang": self.source_lang,
+                "target_lang": self.target_lang,
+                "auto_language": self.auto_source,
             }
         )
         for warning in warnings:
             await self.send_warning(warning)
+
+    async def _configure_idle(self) -> None:
+        self.native_translation = False
+        self.translator = None
+        self.translator_id = None
+        self.tts_chain = []
+        self.meeting = None
+        self.stt_provider = None
+        logger.info("Session idle: %s→%s, nothing to translate or transcribe", self.source_lang, self.target_lang)
+        await self.send_json(
+            {
+                "type": "session",
+                "meeting_id": None,
+                "meeting_title": None,
+                "stt_provider": None,
+                "tts_provider": None,
+                "translator": None,
+                "translate": self.translate,
+                "transcribe": False,
+                "source": self.source,
+                "diarization": False,
+                "source_lang": self.source_lang,
+                "target_lang": self.target_lang,
+                "auto_language": self.auto_source,
+                "idle": True,
+            }
+        )
 
     async def _maybe_reconnect(self) -> None:
         now = time.time()
@@ -315,6 +375,15 @@ class LiveSession:
             return None
         return max(0, int((absolute - self.meeting["started_at"]) * 1000))
 
+    def _segment_language(self, detected: Any) -> str | None:
+        """ISO base code of what was said: detected by the provider, else the fixed source language."""
+        if isinstance(detected, str) and detected.strip():
+            return _base(detected.strip())
+        return None if self.auto_source else _base(self.source_lang)
+
+    def _same_as_target(self, language: str | None) -> bool:
+        return bool(language) and language == _base(self.target_lang)
+
     async def _on_transcript(
         self,
         text: str,
@@ -322,20 +391,24 @@ class LiveSession:
         speaker: Any = None,
         start_ms: Any = None,
         end_ms: Any = None,
+        language: Any = None,
         **_: Any,
     ) -> None:
         if not text:
             return  # note: no `self.open` check — finals flushed during close are still stored
         spk = self._speaker(speaker)
+        lang = self._segment_language(language)
         payload: dict[str, Any] = {
             "type": "transcript",
             "text": text,
             "is_final": is_final,
             "speaker": spk,
             "source": self.source,
+            "language": lang,
         }
         segment_id: int | None = None
         if is_final and text.strip():
+            self._last_final_text = text.strip()
             if self.meeting:
                 seg = meeting_store.add_segment(
                     self.meeting["id"],
@@ -344,26 +417,44 @@ class LiveSession:
                     speaker=spk,
                     start_ms=self._rel_ms(start_ms),
                     end_ms=self._rel_ms(end_ms),
+                    language=lang,
                 )
                 segment_id = seg["id"]
                 payload["segment_id"] = segment_id
                 payload["start_ms"] = seg["start_ms"]
                 self._last_segment_id = segment_id
                 self._maybe_checkpoint_memory()
-            if self.translator is not None and self.open:
-                await self._buffer_for_translation(text.strip(), segment_id, spk)
+            # Already in the listener's language → nothing to translate or speak.
+            if self.translator is not None and self.open and not self._same_as_target(lang):
+                await self._buffer_for_translation(text.strip(), segment_id, spk, lang)
         await self.send_json(payload)
 
-    async def _on_translation(self, text: str, is_final: bool, speaker: Any = None, **_: Any) -> None:
+    async def _on_translation(
+        self, text: str, is_final: bool, speaker: Any = None, language: Any = None, **_: Any
+    ) -> None:
         if not self.translate:
             return
+        lang = self._segment_language(language)
+        if self._same_as_target(lang):
+            return  # a provider "translating" speech that is already in the target language
         spk = self._speaker(speaker)
         if not is_final:
-            await self.send_json({"type": "translated_text_partial", "text": text, "speaker": spk, "source": self.source})
+            await self.send_json(
+                {"type": "translated_text_partial", "text": text, "speaker": spk, "source": self.source, "language": lang}
+            )
             return
+        if self.auto_source and self._last_final_text and _norm(text) == _norm(self._last_final_text):
+            return  # echo of the original (language unknown): don't re-speak it
         segment_id = self._last_segment_id
         await self.send_json(
-            {"type": "translated_text", "text": text, "segment_id": segment_id, "speaker": spk, "source": self.source}
+            {
+                "type": "translated_text",
+                "text": text,
+                "segment_id": segment_id,
+                "speaker": spk,
+                "source": self.source,
+                "language": lang,
+            }
         )
         if segment_id is not None and self.meeting and text.strip():
             meeting_store.set_segment_translation(segment_id, text)
@@ -377,11 +468,14 @@ class LiveSession:
 
     # ── text-translation buffering (providers without native translation) ──
 
-    async def _buffer_for_translation(self, text: str, segment_id: int | None, speaker: str | None) -> None:
-        if self._pending and speaker != self._pending_speaker:
+    async def _buffer_for_translation(
+        self, text: str, segment_id: int | None, speaker: str | None, language: str | None = None
+    ) -> None:
+        if self._pending and (speaker != self._pending_speaker or language != self._pending_language):
             await self._flush_translation()
         self._pending.append((text, segment_id))
         self._pending_speaker = speaker
+        self._pending_language = language
         joined = " ".join(t for t, _ in self._pending)
         if len(joined) >= self.translation_trigger_chars or joined.rstrip().endswith(SENTENCE_END):
             await self._flush_translation()
@@ -406,8 +500,9 @@ class LiveSession:
         text = " ".join(t for t, _ in self._pending)
         ids = [sid for _, sid in self._pending if sid is not None]
         speaker = self._pending_speaker
+        language = self._pending_language
         self._pending = []
-        await self.queue.put(("translate", text, ids, speaker))
+        await self.queue.put(("translate", text, ids, speaker, language))
 
     # ── worker: translation + TTS, strictly in order ─────────────────
 
@@ -420,25 +515,37 @@ class LiveSession:
                 if item[0] == "tts":
                     await self._speak(item[1], item[2])
                 elif item[0] == "translate":
-                    await self._translate_and_speak(item[1], item[2], item[3])
+                    await self._translate_and_speak(item[1], item[2], item[3], item[4])
             except Exception as exc:  # noqa: BLE001 — never kill the worker
                 logger.exception("Session worker error: %s", exc)
             finally:
                 self.queue.task_done()
 
-    async def _translate_and_speak(self, text: str, segment_ids: list[int], speaker: str | None) -> None:
+    async def _translate_and_speak(
+        self, text: str, segment_ids: list[int], speaker: str | None, language: str | None = None
+    ) -> None:
         if not self.open or self.translator is None:
             return
+        source = language or self.source_lang  # "auto" when the segment's language is unknown
         try:
-            translated = await self.translator.translate(text, self.source_lang, self.target_lang)
+            translated = await self.translator.translate(text, source, self.target_lang)
         except Exception as exc:  # noqa: BLE001
             await self.send_warning(f"Translation failed: {exc}")
             return
         if not translated:
             return
+        if self.auto_source and _norm(translated) == _norm(text):
+            return  # it was already in the target language
         segment_id = segment_ids[-1] if segment_ids else None
         await self.send_json(
-            {"type": "translated_text", "text": translated, "segment_id": segment_id, "speaker": speaker, "source": self.source}
+            {
+                "type": "translated_text",
+                "text": translated,
+                "segment_id": segment_id,
+                "speaker": speaker,
+                "source": self.source,
+                "language": language,
+            }
         )
         if segment_id is not None and self.meeting:
             meeting_store.set_segment_translation(segment_id, translated)

@@ -166,6 +166,7 @@ export default function App() {
               speaker: msg.speaker,
               text: msg.text,
               translated_text: null,
+              language: msg.language ?? null,
               start_ms: msg.startMs ?? 0,
               end_ms: null,
             };

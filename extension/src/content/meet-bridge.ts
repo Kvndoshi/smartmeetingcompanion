@@ -91,6 +91,11 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
       deactivateMicCapture();
       sendResponse({ success: true });
       return;
+    case "mic-interceptor-mix":
+      // mic: true → the call hears your own voice; false → only the translation.
+      postToInterceptor("interpreter-mix", { mic: message.mic === true });
+      sendResponse({ success: true });
+      return;
     case "get-meet-mic-state":
       sendResponse({ live: voiceInCall });
       return;

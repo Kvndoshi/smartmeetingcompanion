@@ -35,8 +35,24 @@ def test_pick_voice_defaults(client: AzureTtsClient, language: str, gender, expe
     assert client._pick_voice(language, gender) == expected
 
 
-def test_pick_voice_unknown_lang_falls_back_to_english(client: AzureTtsClient):
-    assert client._pick_voice("xx", "male") == "en-US-AndrewNeural"
+def test_pick_voice_unknown_lang_raises_so_the_next_provider_is_tried(client: AzureTtsClient):
+    # Reading another language with an English voice is worse than falling through the chain.
+    with pytest.raises(ValueError):
+        client._pick_voice("xx", "male")
+
+
+@pytest.mark.parametrize(
+    "language, gender, expected",
+    [
+        ("gu", "female", "gu-IN-DhwaniNeural"),
+        ("gu", "male", "gu-IN-NiranjanNeural"),
+        ("ta-IN", "female", "ta-IN-PallaviNeural"),
+        ("ml", "male", "ml-IN-MidhunNeural"),
+    ],
+)
+def test_pick_voice_indic_languages(client: AzureTtsClient, language: str, gender: str, expected: str):
+    assert client._pick_voice(language, gender) == expected
+    assert client._pick_voice(language, None, speaker_id="2").startswith(language.split("-")[0])
 
 
 def test_pick_voice_env_override(monkeypatch: pytest.MonkeyPatch):

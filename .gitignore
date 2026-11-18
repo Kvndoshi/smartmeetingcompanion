@@ -33,3 +33,6 @@ backend/reports/
 
 # Personal Claude Code settings (may hold tokens)
 .claude/settings.local.json
+
+# Built copy used by the interceptor browser harness
+extension/tests/interceptor-harness/interceptor.js

@@ -10,7 +10,13 @@ let audioContext: AudioContext | null = null;
 let sourceNode: MediaStreamAudioSourceNode | null = null;
 let processorNode: AudioWorkletNode | null = null;
 let processorMonitorGain: GainNode | null = null;
-let passthroughOn = false;
+// The meeting's own audio. tabCapture mutes the tab, so we play it back through
+// this gain: 1 = as usual, lower = "quietly underneath" the translation.
+let tabGain: GainNode | null = null;
+let originalLevel = 1; // chosen by the service worker (language-aware)
+let duckLevel = 0.15; // used while translated speech plays
+let ttsPlaying = false;
+let ttsReleaseTimer: ReturnType<typeof setTimeout> | null = null;
 let playbackContext: AudioContext | null = null;
 let playbackElement: HTMLAudioElement | null = null;
 let playbackGeneration = 0;
@@ -152,7 +158,8 @@ function setOutputDevice(deviceId: string): void {
 async function startCapture(
   streamId: string,
   initialOutputDeviceId: string | null,
-  passthrough: boolean
+  level: number,
+  duck: number
 ): Promise<{ success: boolean; error?: string }> {
   try {
     stopCapture();
@@ -170,10 +177,15 @@ async function startCapture(
     audioContext = new AudioContext({ sampleRate: 48000 });
     sourceNode = audioContext.createMediaStreamSource(mediaStream);
 
-    // tabCapture mutes the tab for the user. When translating that's intended
-    // (only the translation is heard); in notes-only mode the original audio is
-    // played back so the meeting stays audible.
-    setPassthrough(passthrough);
+    // tabCapture mutes the tab for the user; play the meeting back through a gain
+    // so voices can sit quietly under their translation (or at full volume when
+    // someone already speaks your language, or in notes-only mode).
+    tabGain = audioContext.createGain();
+    originalLevel = clampLevel(level);
+    duckLevel = clampLevel(duck);
+    tabGain.gain.value = effectiveOriginalLevel();
+    sourceNode.connect(tabGain);
+    tabGain.connect(audioContext.destination);
 
     if (!audioContext.audioWorklet) {
       throw new Error("AudioWorklet is not available in this browser");
@@ -204,7 +216,7 @@ async function startCapture(
       reportError("capture", "Tab audio capture ended (the tab was closed or navigated).");
     });
 
-    console.log("[Offscreen] Capture started (passthrough=%s)", passthrough);
+    console.log("[Offscreen] Capture started (original level=%s)", originalLevel);
     return { success: true };
   } catch (err) {
     console.error("[Offscreen] Capture error:", err);
@@ -213,33 +225,61 @@ async function startCapture(
   }
 }
 
-function setPassthrough(enabled: boolean): void {
-  if (!audioContext || !sourceNode) return;
-  if (enabled && !passthroughOn) {
-    sourceNode.connect(audioContext.destination);
-  } else if (!enabled && passthroughOn) {
-    try {
-      sourceNode.disconnect(audioContext.destination);
-    } catch {
-      /* not connected */
+function clampLevel(level: number): number {
+  return Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 1;
+}
+
+function effectiveOriginalLevel(): number {
+  return ttsPlaying ? Math.min(originalLevel, duckLevel) : originalLevel;
+}
+
+/** Glide to the current level: quick duck, slower release (no clicks, no pumping). */
+function applyOriginalLevel(): void {
+  if (!audioContext || !tabGain) return;
+  const target = effectiveOriginalLevel();
+  const now = audioContext.currentTime;
+  tabGain.gain.cancelScheduledValues(now);
+  tabGain.gain.setTargetAtTime(target, now, target < tabGain.gain.value ? 0.06 : 0.25);
+}
+
+function setOriginalLevel(level: number, duck: number): void {
+  originalLevel = clampLevel(level);
+  duckLevel = clampLevel(duck);
+  applyOriginalLevel();
+}
+
+function setTtsPlaying(playing: boolean): void {
+  if (ttsReleaseTimer) clearTimeout(ttsReleaseTimer);
+  ttsReleaseTimer = null;
+  if (playing) {
+    if (!ttsPlaying) {
+      ttsPlaying = true;
+      applyOriginalLevel();
     }
+    return;
   }
-  passthroughOn = enabled;
+  // Hold the duck briefly: the next translated chunk often follows right away.
+  ttsReleaseTimer = setTimeout(() => {
+    ttsReleaseTimer = null;
+    ttsPlaying = false;
+    applyOriginalLevel();
+  }, 600);
 }
 
 function stopCapture(): void {
   if (processorNode) processorNode.port.onmessage = null;
   processorNode?.disconnect();
   processorMonitorGain?.disconnect();
+  tabGain?.disconnect();
   sourceNode?.disconnect();
   audioContext?.close().catch(() => {});
   mediaStream?.getTracks().forEach((t) => t.stop());
   processorNode = null;
   processorMonitorGain = null;
+  tabGain = null;
   sourceNode = null;
   audioContext = null;
   mediaStream = null;
-  passthroughOn = false;
 }
 
 // ── Microphone capture (your own voice in the meeting notes) ──
@@ -419,9 +459,13 @@ let playbackBusy = false;
 async function playNextInQueue(): Promise<void> {
   if (playbackBusy) return;
   const bytes = playbackQueue.shift();
-  if (!bytes) return;
+  if (!bytes) {
+    setTtsPlaying(false);
+    return;
+  }
 
   playbackBusy = true;
+  setTtsPlaying(true);
   const generation = ++playbackGeneration;
   const element = getPlaybackElement();
   const onDone = () => {
@@ -465,6 +509,7 @@ function stopPlayback(): void {
   playbackGeneration++;
   stopPlaybackElement();
   playbackBusy = false;
+  setTtsPlaying(false);
 }
 
 // ── Message Listener ──
@@ -473,7 +518,7 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
 
   switch (message.type) {
     case "start-capture":
-      void startCapture(message.streamId, message.outputDeviceId, message.passthrough).then(sendResponse);
+      void startCapture(message.streamId, message.outputDeviceId, message.originalLevel, message.duckLevel).then(sendResponse);
       return true;
     case "stop-capture":
       stopCapture();
@@ -488,8 +533,8 @@ chrome.runtime.onMessage.addListener((message: OffscreenRequest, _sender, sendRe
       stopMicCapture();
       sendResponse({ success: true });
       return false;
-    case "set-passthrough":
-      setPassthrough(message.enabled);
+    case "set-original-level":
+      setOriginalLevel(message.level, message.duckLevel);
       sendResponse({ success: true });
       return false;
     case "translated-audio":

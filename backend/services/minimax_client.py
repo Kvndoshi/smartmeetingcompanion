@@ -41,6 +41,16 @@ LANGUAGE_NAMES = {
     "sv": "Swedish",
     "pl": "Polish",
     "tr": "Turkish",
+    "gu": "Gujarati",
+    "bn": "Bengali",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "mr": "Marathi",
+    "ur": "Urdu",
+    "pa": "Punjabi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "auto": "the detected language",
 }
 
 # MiniMax official system voices (speech-2.8-turbo).

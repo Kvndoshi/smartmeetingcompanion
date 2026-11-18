@@ -7,6 +7,7 @@ export type Source = "tab" | "mic";
 
 export interface BackendConfig {
   type: "config";
+  /** "auto" = the provider detects each segment's language. */
   source_lang: string;
   target_lang: string;
   mode: { translate: boolean; transcribe: boolean };
@@ -31,6 +32,11 @@ export type ServerMessage =
       transcribe: boolean;
       source: Source;
       diarization: boolean;
+      source_lang?: string;
+      target_lang?: string;
+      auto_language?: boolean;
+      // Nothing to translate or transcribe: no provider connection until the next config.
+      idle?: boolean;
     }
   | {
       type: "transcript";
@@ -38,11 +44,20 @@ export type ServerMessage =
       is_final: boolean;
       speaker: string | null;
       source: Source;
+      /** ISO base code of what was said; null when unknown. */
+      language?: string | null;
       segment_id?: number;
       start_ms?: number;
     }
-  | { type: "translated_text_partial"; text: string; speaker: string | null; source: Source }
-  | { type: "translated_text"; text: string; segment_id: number | null; speaker: string | null; source: Source }
+  | { type: "translated_text_partial"; text: string; speaker: string | null; source: Source; language?: string | null }
+  | {
+      type: "translated_text";
+      text: string;
+      segment_id: number | null;
+      speaker: string | null;
+      source: Source;
+      language?: string | null;
+    }
   | { type: "stopped"; meeting_id: string | null }
   | { type: "meeting_ended"; meeting_id: string | null }
   | { type: "status"; status: "reconnecting" }
@@ -60,6 +75,9 @@ export interface Modes {
   notes: boolean;
 }
 
+/** What happens to the other participants' own voices while their translation plays. */
+export type OriginalAudio = "quiet" | "muted";
+
 export interface SessionState {
   isCapturing: boolean;
   status: CaptureStatus;
@@ -72,11 +90,20 @@ export interface SessionState {
   includeMic: boolean;
   /** Your own voice in the transcript (offscreen mic, notes mode). */
   micStatus: MicStatus;
-  /** Meet-only outgoing voice translation. */
+  /** Meet-only outgoing voice translation ("What they hear"). */
   isMicTranslating: boolean;
   outgoingStatus: MicStatus;
+  /** They speak: "auto" or a language code. */
   sourceLang: string;
+  /** My language: what I speak and want to hear. */
   targetLang: string;
+  /** Others hear me in: "auto" (match the room) or a language code. */
+  speakLang: string;
+  /** Language others currently hear me in; null = my own voice (no translation). */
+  outgoingLang: string | null;
+  /** Detected language the other participants mostly speak (auto mode), if known. */
+  roomLang: string | null;
+  originalAudio: OriginalAudio;
   sttProvider: string | null;
   ttsProvider: string | null;
   activeProviders: { stt: string | null; tts: string | null; translator: string | null; diarization: boolean };
@@ -97,8 +124,12 @@ export const INITIAL_STATE: SessionState = {
   micStatus: "idle",
   isMicTranslating: false,
   outgoingStatus: "idle",
-  sourceLang: "en",
-  targetLang: "es",
+  sourceLang: "auto",
+  targetLang: "en",
+  speakLang: "auto",
+  outgoingLang: null,
+  roomLang: null,
+  originalAudio: "quiet",
   sttProvider: null,
   ttsProvider: null,
   activeProviders: { stt: null, tts: null, translator: null, diarization: false },
@@ -117,6 +148,7 @@ export type UiMessage =
       text: string;
       isFinal: boolean;
       speaker: string | null;
+      language?: string | null;
       segmentId?: number;
       startMs?: number;
       meetingId: string | null;
@@ -128,6 +160,7 @@ export type UiMessage =
       text: string;
       isFinal: boolean;
       speaker: string | null;
+      language?: string | null;
       segmentId?: number | null;
       meetingId: string | null;
     }
@@ -146,6 +179,7 @@ export interface StartCaptureRequest {
   includeMic?: boolean;
   sttProvider?: string | null;
   ttsProvider?: string | null;
+  originalAudio?: OriginalAudio;
   tabId?: number;
 }
 
@@ -154,7 +188,9 @@ export type BackgroundRequest =
   | { type: "stop-capture"; target: "background"; endMeeting?: boolean }
   | { type: "get-state"; target: "background" }
   | { type: "set-output-device"; target: "background"; deviceId: string }
-  | { type: "start-mic-translation"; target: "background"; sourceLang: string; targetLang: string }
+  // "What they hear": I speak `myLang`; others hear `speakLang` ("auto" = match the room).
+  | { type: "start-mic-translation"; target: "background"; myLang: string; speakLang: string; tabId?: number }
+  | { type: "set-speak-language"; target: "background"; speakLang: string }
   | { type: "stop-mic-translation"; target: "background" }
   | { type: "open-side-panel"; target: "background" }
   | { type: "audio-data"; target: "background"; data: number[] }
@@ -173,11 +209,12 @@ export interface BackgroundResponse {
 /* ── Service worker → offscreen document ───────────────────────────── */
 
 export type OffscreenRequest =
-  | { type: "start-capture"; target: "offscreen"; streamId: string; outputDeviceId: string | null; passthrough: boolean }
+  // originalLevel: volume of the meeting's own audio (tabCapture mutes the tab): 1 = as usual, 0 = silent.
+  | { type: "start-capture"; target: "offscreen"; streamId: string; outputDeviceId: string | null; originalLevel: number; duckLevel: number }
   | { type: "stop-capture"; target: "offscreen" }
   | { type: "start-mic-capture"; target: "offscreen" }
   | { type: "stop-mic-capture"; target: "offscreen" }
-  | { type: "set-passthrough"; target: "offscreen"; enabled: boolean }
+  | { type: "set-original-level"; target: "offscreen"; level: number; duckLevel: number }
   | { type: "translated-audio"; target: "offscreen"; data: number[] }
   | { type: "set-output-device"; target: "offscreen"; deviceId: string | null };
 
@@ -189,6 +226,7 @@ export interface ProviderInfo {
   configured: boolean;
   diarization?: boolean;
   native_translation?: boolean;
+  auto_language?: boolean;
   languages?: string[] | null;
   notes?: string;
 }
@@ -234,6 +272,7 @@ export interface Segment {
   speaker: string | null;
   text: string;
   translated_text: string | null;
+  language?: string | null;
   start_ms: number;
   end_ms: number | null;
 }

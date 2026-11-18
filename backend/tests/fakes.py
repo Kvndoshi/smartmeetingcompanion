@@ -58,14 +58,17 @@ class FakeStt:
             ("transcript", "hello world", True, "1"),
             ("translation", "hola mundo", True, "1"),
         ]
-        for kind, text, is_final, speaker in script:
+        for item in script:
+            # (kind, text, is_final, speaker[, language]) — language as a provider would detect it
+            kind, text, is_final, speaker = item[:4]
+            extra = {"language": item[4]} if len(item) > 4 else {}
             if kind == "transcript":
-                await self.cb.on_transcript(text, is_final, speaker=speaker, start_ms=0, end_ms=900)
+                await self.cb.on_transcript(text, is_final, speaker=speaker, start_ms=0, end_ms=900, **extra)
             elif kind == "translation" and self.cb.on_translation:
-                await self.cb.on_translation(text, is_final, speaker=speaker)
+                await self.cb.on_translation(text, is_final, speaker=speaker, **extra)
 
     async def close(self) -> None:
-        for kind, text, is_final, speaker in self.fakes.close_script:
+        for kind, text, is_final, speaker, *_ in self.fakes.close_script:
             if kind == "transcript":
                 await self.cb.on_transcript(text, is_final, speaker=speaker, start_ms=1000, end_ms=1900)
         self.closed = True
@@ -96,7 +99,9 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Fakes:
     monkeypatch.setenv("TTS_PROVIDER", "fake")
 
     fakes = Fakes()
-    stt_spec = registry.ProviderSpec("fake", "Fake STT", ("FAKE_KEY",), diarization=True, native_translation=True)
+    stt_spec = registry.ProviderSpec(
+        "fake", "Fake STT", ("FAKE_KEY",), diarization=True, native_translation=True, auto_language=True
+    )
     monkeypatch.setitem(registry.STT_SPECS, "fake", stt_spec)
     monkeypatch.setitem(registry.STT_BUILDERS, "fake", lambda lang, target, cb: FakeStt(fakes, lang, target, cb))
     monkeypatch.setitem(registry.TTS_SPECS, "fake", registry.ProviderSpec("fake", "Fake TTS", ("FAKE_KEY",)))

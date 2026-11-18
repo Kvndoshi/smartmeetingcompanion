@@ -173,6 +173,18 @@ body.panel-body-root #root {
   font-size: 12px;
 }
 
+.lang-chip {
+  align-self: center;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--glass-border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+
 .seg-time {
   font-size: 10.5px;
   color: var(--text-muted);

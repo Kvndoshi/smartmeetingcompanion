@@ -14,6 +14,11 @@ from services.minimax_client import get_language_name
 logger = logging.getLogger("interpreter.text_translator")
 
 
+def is_auto(code: str | None) -> bool:
+    """True when the source language is unknown (detected per segment, or not at all)."""
+    return (code or "").split("-")[0].strip().lower() in {"", "auto", "multi"}
+
+
 class TextTranslator(Protocol):
     name: str
 
@@ -37,15 +42,23 @@ class LLMTranslator:
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         if not text.strip():
             return ""
-        src = get_language_name(source_lang)
         tgt = get_language_name(target_lang)
+        if is_auto(source_lang):
+            task = (
+                f"You are a live meeting interpreter. The user's speech may be in any language. Translate it "
+                f"into natural, spoken {tgt}. If it is already in {tgt}, return it unchanged. "
+            )
+        else:
+            task = (
+                f"You are a live meeting interpreter. Translate the user's {get_language_name(source_lang)} "
+                f"speech into natural, spoken {tgt}. "
+            )
         out = await self._llm.complete(
             [
                 {
                     "role": "system",
-                    "content": (
-                        f"You are a live meeting interpreter. Translate the user's {src} speech into natural, "
-                        f"spoken {tgt}. Output only the translation — no quotes, notes, or explanations. "
+                    "content": task + (
+                        "Output only the translation — no quotes, notes, or explanations. "
                         "Keep names, numbers and product terms unchanged."
                     ),
                 },
@@ -84,17 +97,18 @@ class AzureTextTranslator:
         }
         if self.region:
             headers["Ocp-Apim-Subscription-Region"] = self.region
-        resp = await self._client.post(
-            self.ENDPOINT,
-            params={"api-version": "3.0", "from": source_lang.split("-")[0], "to": target},
-            headers=headers,
-            json=[{"text": text}],
-        )
+        params = {"api-version": "3.0", "to": target}
+        if not is_auto(source_lang):
+            params["from"] = source_lang.split("-")[0]  # omitted → Azure detects the language
+        resp = await self._client.post(self.ENDPOINT, params=params, headers=headers, json=[{"text": text}])
         resp.raise_for_status()
         data = resp.json()
         try:
+            detected = (data[0].get("detectedLanguage") or {}).get("language")
+            if detected and detected.split("-")[0].lower() == target_lang.split("-")[0].lower():
+                return text  # already in the target language
             return data[0]["translations"][0]["text"]
-        except (KeyError, IndexError, TypeError):
+        except (KeyError, IndexError, TypeError, AttributeError):
             return ""
 
     async def close(self) -> None:

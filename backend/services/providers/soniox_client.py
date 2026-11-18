@@ -32,6 +32,17 @@ def _base(code: str | None) -> str:
     return (code or "").split("-")[0].lower()
 
 
+def dominant_language(tokens: list[dict[str, Any]]) -> str | None:
+    """Language covering most of the text (tokens carry `language` with identification on)."""
+    weights: dict[str, int] = {}
+    for t in tokens:
+        lang = t.get("language")
+        if lang:
+            base = _base(lang)
+            weights[base] = weights.get(base, 0) + len((t.get("text") or "").strip()) + 1
+    return max(weights, key=weights.get) if weights else None  # type: ignore[arg-type]
+
+
 class _Utterance:
     """Accumulates finalized tokens for one speaker turn."""
 
@@ -47,6 +58,17 @@ class _Utterance:
         for t in self.tokens:
             if t.get("speaker") is not None:
                 return str(t["speaker"])
+        return None
+
+    @property
+    def language(self) -> str | None:
+        return dominant_language(self.tokens)
+
+    @property
+    def last_language(self) -> str | None:
+        for t in reversed(self.tokens):
+            if t.get("language"):
+                return _base(t["language"])
         return None
 
     def bounds(self) -> tuple[int | None, int | None]:
@@ -94,6 +116,7 @@ class SonioxClient:
 
         self._orig = _Utterance()
         self._trans = _Utterance()
+        self._last_orig_language: str | None = None
 
     # ── config ───────────────────────────────────────────────────────
 
@@ -245,7 +268,17 @@ class SonioxClient:
                         # Original speech resumed → previous translation chunk is complete.
                         await self._flush_translation()
                     spk = tok.get("speaker")
+                    lang = _base(tok.get("language")) or None
                     if self._orig.tokens and spk is not None and self._orig.speaker not in (None, str(spk)):
+                        await self._flush_original()
+                    elif (
+                        self._orig.tokens
+                        and lang
+                        and self._orig.last_language not in (None, lang)
+                        and self._orig.text.endswith(SENTENCE_END)
+                    ):
+                        # Same speaker switched language at a sentence boundary. Mid-sentence
+                        # switches (Hinglish) stay one segment.
                         await self._flush_original()
                     self._orig.tokens.append(tok)
             else:
@@ -264,10 +297,14 @@ class SonioxClient:
         partial_orig = (self._orig.text + "".join(t.get("text", "") for t in nonfinal_orig)).strip()
         if nonfinal_orig and partial_orig and self.on_transcript:
             speaker = next((str(t["speaker"]) for t in nonfinal_orig if t.get("speaker") is not None), self._orig.speaker)
-            await self.on_transcript(partial_orig, False, speaker=speaker)
+            language = dominant_language(self._orig.tokens + nonfinal_orig)
+            await self.on_transcript(partial_orig, False, speaker=speaker, language=language)
         partial_trans = (self._trans.text + "".join(t.get("text", "") for t in nonfinal_trans)).strip()
         if nonfinal_trans and partial_trans and self.on_translation:
-            await self.on_translation(partial_trans, False, speaker=self.last_speaker_id)
+            await self.on_translation(
+                partial_trans, False, speaker=self.last_speaker_id,
+                language=self._orig.language or self._last_orig_language,
+            )
 
     async def _flush_original(self) -> None:
         text = self._orig.text
@@ -275,12 +312,14 @@ class SonioxClient:
             self._orig.clear()
             return
         speaker = self._orig.speaker
+        language = self._orig.language
         start, end = self._orig.bounds()
         self._orig.clear()
         if speaker:
             self.last_speaker_id = speaker
+        self._last_orig_language = language
         if self.on_transcript:
-            await self.on_transcript(text, True, speaker=speaker, start_ms=start, end_ms=end)
+            await self.on_transcript(text, True, speaker=speaker, start_ms=start, end_ms=end, language=language)
 
     async def _flush_translation(self) -> None:
         if self._translation_timer and not self._translation_timer.done() and self._translation_timer is not asyncio.current_task():
@@ -294,7 +333,7 @@ class SonioxClient:
         if self._orig.tokens:
             await self._flush_original()
         if self.on_translation:
-            await self.on_translation(text, True, speaker=self.last_speaker_id)
+            await self.on_translation(text, True, speaker=self.last_speaker_id, language=self._last_orig_language)
 
     def _arm_translation_timer(self) -> None:
         if self._translation_timer and not self._translation_timer.done():

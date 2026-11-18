@@ -131,7 +131,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             translated_text TEXT,
             start_ms        INTEGER NOT NULL DEFAULT 0,
             end_ms          INTEGER,
-            created_at      REAL NOT NULL
+            created_at      REAL NOT NULL,
+            language        TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_segments_meeting ON segments(meeting_id, start_ms, id);
 
@@ -165,6 +166,16 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for databases created by older versions."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(segments)")}
+    if "language" not in columns:
+        # Detected spoken language of the segment (ISO base code), when known.
+        conn.execute("ALTER TABLE segments ADD COLUMN language TEXT")
+        conn.commit()
 
 
 def init_db() -> None:
@@ -414,6 +425,7 @@ def add_segment(
     translated_text: str | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
+    language: str | None = None,
 ) -> dict[str, Any]:
     conn = _conn()
     now = time.time()
@@ -421,9 +433,9 @@ def add_segment(
         row = conn.execute("SELECT started_at FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         start_ms = int((now - row["started_at"]) * 1000) if row else 0
     cur = conn.execute(
-        """INSERT INTO segments (meeting_id, source, speaker, text, translated_text, start_ms, end_ms, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (meeting_id, source, speaker, text.strip(), translated_text, int(start_ms), end_ms, now),
+        """INSERT INTO segments (meeting_id, source, speaker, text, translated_text, start_ms, end_ms, created_at, language)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (meeting_id, source, speaker, text.strip(), translated_text, int(start_ms), end_ms, now, language),
     )
     conn.execute("UPDATE meetings SET last_activity_at = ? WHERE id = ?", (now, meeting_id))
     conn.commit()

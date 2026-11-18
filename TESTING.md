@@ -10,9 +10,10 @@ uv run pytest -q
 ```bash
 cd extension
 npm run build
+npm test
 ```
 
-- `pytest` runs 125 tests:
+- `pytest` runs 148 tests:
   - WebSocket contract tests with fake providers
   - Soniox and Deepgram stream parsers, plus the Azure clients
   - the LLM client
@@ -20,7 +21,31 @@ npm run build
   - meeting store and Supermemory sync
   - settings
   - an end-to-end dry run
+  - multilingual behaviour (`test_multilingual.py`):
+    - auto-detect config for Soniox and Deepgram
+    - language tags, same-language skip and echo drop
+    - re-config on the same socket
+    - the registry's auto-detect rules
+    - migrating an old database
 - `npm run build` runs a `tsc` type-check plus the vite build into `extension/dist`.
+- `npm test` runs the room-language estimator tests with Node 24's built-in runner.
+
+### Meet interceptor browser test page
+
+This page exercises the real built interceptor against fake `RTCPeerConnection`s in Chrome: the mic swap, mute handling, and the own-voice mix used by "Auto — match the room".
+
+```bash
+cd extension
+npm run build
+node tests/interceptor-harness/prepare.mjs
+```
+
+```bash
+cd extension/tests/interceptor-harness
+python -m http.server 5181 --bind 127.0.0.1
+```
+
+Open `http://127.0.0.1:5181/` in Chrome and click **Run interceptor tests**. All 38 lines should say PASS.
 
 ## Live providers (needs keys in `backend/.env`)
 
@@ -58,6 +83,29 @@ Setup:
 
 Tab capture needs a real click on the toolbar icon, so these steps can't be automated. The first two sections cover paths no automated test exercised, so do them first.
 
+### 0. Two-way and multi-language translation (Google Meet, needs keys)
+Use headphones on every machine. Each "participant" can be another browser profile or a phone.
+- [ ] **Soniox probe.** With Soniox, My language English and They speak Auto-detect, have someone speak English, then Hindi.
+  - English speech is heard as the original voice: no English re-voicing, and no translation line.
+  - Hindi speech is translated, with an `HI` tag in the side panel.
+  - Note what Soniox's one-way translation does with speech already in the target language. The backend should drop it either way.
+- [ ] **Two people, both directions.** You (English) and a Hindi speaker; only you run Distill.
+  - Turn on **What I hear**: you hear them in English.
+  - Set **Others hear me in = Hindi** and press **Translate my voice**. They hear you in Hindi, not your original voice.
+- [ ] **Live switch.** While translating your voice, change **Others hear me in** from Hindi to Gujarati.
+  - Within a sentence or two they hear Gujarati.
+  - The connection does not restart, and the status line updates.
+- [ ] **Own voice.** Set **Others hear me in** back to Auto with nobody speaking yet. The status says others hear your own voice, and they do hear you.
+- [ ] **Three people (Hindi, Gujarati, English), everyone runs Distill.** Each person sets My language to their own language, What I hear to Auto-detect, and voice translation off.
+  - Each person hears the other two in their own language.
+  - Speakers already in your language sound normal.
+  - Chips and notes show the right language per line.
+- [ ] **Auto — match the room.** Only you run Distill. The others speak mostly Hindi, so you're heard in Hindi.
+  - One stray Gujarati sentence doesn't switch it.
+  - When the room switches to Gujarati and keeps talking, your voice follows within about two minutes. That's how long Gujarati takes to reach a 60% share of the 3-minute window.
+- [ ] **Speakers vs headphones.** Repeat the two-person test on laptop speakers. Expect some echo; the headphones hint is the mitigation.
+- [ ] **Keep original voices quietly underneath.** With it on, the original voices stay faintly audible under the translation. With it off, you hear only the translation.
+
 ### 1. Meet widget and outgoing translation (Google Meet)
 - [ ] **Failure path.** Open a fresh Meet tab without clicking the toolbar icon, then press **Start** in the widget.
   - It shows an error that tells you to start from the toolbar icon.
@@ -68,10 +116,11 @@ Tab capture needs a real click on the toolbar icon, so these steps can't be auto
   - it starts and translates once you unmute.
 
   It must not claim to be translating while nothing is being sent.
-- [ ] Unmute, then turn on **Translate my voice**. A second participant (a phone or another browser profile) hears the translated voice, not your original voice.
+- [ ] Unmute, pick **Others hear me in**, then turn on **Translate my voice**. A second participant (a phone or another browser profile) hears the translated voice, not your original voice.
 - [ ] While translating, mute and then unmute. Translation resumes.
 - [ ] While translating, switch the mic in Meet's settings. Translation continues from the new mic.
-- [ ] Turn **Translate my voice** off. The other participant hears your **real** voice again.
+- [ ] Turn **Translate my voice** off ("Stop — others hear my own voice"). The other participant hears your **real** voice again.
+- [ ] The widget and the popup stay in sync: changing a language in one shows up in the other.
 - [ ] **Stop & summarize** in the widget. The widget returns to idle and the side panel shows the meeting as ended.
 
 ### 2. Popup Start, side panel and microphone
@@ -79,7 +128,7 @@ Tab capture needs a real click on the toolbar icon, so these steps can't be auto
   - The side panel opens straight away, on the **Live** tab.
   - Lines appear within a few seconds, with speaker colours.
 - [ ] **Take notes only.** You can still hear the call audio.
-- [ ] **Translate audio.** The original audio is replaced by the translated voice.
+- [ ] **What I hear.** The original audio drops to quiet (or mutes) under the translated voice.
   - The translation line appears under each transcript line.
   - With no TTS key, the original audio stays audible and a warning shows.
 - [ ] **Your microphone (on by default).** On a fresh install, press **Start** with **Take notes** on.

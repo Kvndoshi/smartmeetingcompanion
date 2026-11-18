@@ -17,9 +17,19 @@ from typing import Any, Callable
 logger = logging.getLogger("interpreter.providers")
 
 # Languages the extension offers (extension/src/utils/languages.ts).
-APP_LANGUAGES = frozenset(
+ORIGINAL_16 = frozenset(
     {"en", "es", "fr", "de", "it", "pt", "zh", "ja", "ko", "ar", "hi", "ru", "nl", "sv", "pl", "tr"}
 )
+# Indian languages added for multilingual meetings (Soniox / Azure / Deepgram cover them).
+INDIC_LANGUAGES = frozenset({"gu", "bn", "ta", "te", "mr", "ur", "pa", "kn", "ml"})
+APP_LANGUAGES = ORIGINAL_16 | INDIC_LANGUAGES
+
+# Source-language values meaning "detect whatever language is spoken".
+AUTO_LANGUAGES = frozenset({"auto", "multi"})
+
+
+def is_auto_language(code: str | None) -> bool:
+    return (code or "").split("-")[0].strip().lower() in AUTO_LANGUAGES
 
 
 class ProviderConfigError(ValueError):
@@ -35,6 +45,7 @@ class ProviderSpec:
     native_translation: bool = False
     languages: frozenset[str] | None = None  # None = every app language
     notes: str = ""
+    auto_language: bool = False  # STT: can identify the spoken language itself
 
     def configured(self) -> bool:
         return all(os.getenv(k, "").strip() for k in self.env_keys)
@@ -54,29 +65,33 @@ class ProviderSpec:
             "native_translation": self.native_translation,
             "languages": sorted(self.languages) if self.languages is not None else None,
             "notes": self.notes,
+            "auto_language": self.auto_language,
         }
 
 
 STT_SPECS: dict[str, ProviderSpec] = {
     "soniox": ProviderSpec(
         "soniox", "Soniox", ("SONIOX_API_KEY",), diarization=True, native_translation=True,
-        notes="Realtime STT + translation + diarization",
+        notes="Realtime STT + translation + diarization + language identification",
+        auto_language=True,
     ),
     "deepgram": ProviderSpec(
         "deepgram", "Deepgram", ("DEEPGRAM_API_KEY",), diarization=True,
-        notes="Realtime STT + diarization; translation via text translator",
+        notes="Realtime STT + diarization (+ multilingual detection); translation via text translator",
+        auto_language=True,
     ),
+    # The added Indian languages are unverified on these providers, so they keep the original set.
     "speechmatics": ProviderSpec(
         "speechmatics", "Speechmatics", ("SPEECHMATICS_API_KEY",), native_translation=True,
-        notes="Realtime STT + translation",
+        languages=ORIGINAL_16, notes="Realtime STT + translation",
     ),
     "azure": ProviderSpec(
         "azure", "Azure Speech (translation)", ("AZURE_SPEECH_KEY",), native_translation=True,
-        notes="Azure TranslationRecognizer",
+        languages=ORIGINAL_16, notes="Azure TranslationRecognizer",
     ),
     "azure_diarize": ProviderSpec(
         "azure_diarize", "Azure Speech (diarization)", ("AZURE_SPEECH_KEY",), diarization=True,
-        native_translation=True, notes="ConversationTranscriber + Azure Translator",
+        native_translation=True, languages=ORIGINAL_16, notes="ConversationTranscriber + Azure Translator",
     ),
 }
 
@@ -85,10 +100,11 @@ TTS_SPECS: dict[str, ProviderSpec] = {
     "azure": ProviderSpec("azure", "Azure Neural TTS", ("AZURE_SPEECH_KEY",)),
     "deepgram": ProviderSpec(
         "deepgram", "Deepgram Flux TTS", ("DEEPGRAM_API_KEY",),
-        # Flux TTS voices exist for every app language except Arabic.
-        languages=APP_LANGUAGES - {"ar"},
+        # Flux TTS has no Arabic, Malayalam or Punjabi voice (developers.deepgram.com/docs/flux-tts/voices).
+        languages=APP_LANGUAGES - {"ar", "ml", "pa"},
     ),
-    "minimax": ProviderSpec("minimax", "MiniMax Speech", ("MINIMAX_API_KEY",)),
+    # MiniMax language_boost lists none of the added Indian languages.
+    "minimax": ProviderSpec("minimax", "MiniMax Speech", ("MINIMAX_API_KEY",), languages=ORIGINAL_16),
     "speechmatics": ProviderSpec(
         "speechmatics", "Speechmatics TTS (preview)", ("SPEECHMATICS_API_KEY",),
         languages=frozenset({"en"}),
@@ -178,15 +194,27 @@ def _missing_key_message(kind: str, provider_id: str) -> str:
     return f"{spec.label} is not configured: set {keys} in backend/.env"
 
 
-def resolve(kind: str, requested: str | None = None, *, language: str | None = None) -> str:
-    """Pick a configured provider id for `kind` (stt|tts|llm|translator)."""
+def resolve(
+    kind: str, requested: str | None = None, *, language: str | None = None, require_auto: bool = False
+) -> str:
+    """Pick a configured provider id for `kind` (stt|tts|llm|translator).
+
+    `require_auto` (STT): the provider must identify the spoken language itself.
+    """
     specs = SPECS[kind]
     requested = (requested or "").strip().lower() or None
+    if language and is_auto_language(language):
+        language = None
     if requested and requested != "auto":
         if requested not in specs:
             raise ProviderConfigError(f"Unknown {kind} provider '{requested}'")
         if not is_configured(kind, requested):
             raise ProviderConfigError(_missing_key_message(kind, requested))
+        if require_auto and not specs[requested].auto_language:
+            raise ProviderConfigError(
+                f"{specs[requested].label} can't auto-detect the spoken language - "
+                "use Soniox or Deepgram, or pick the language the others speak"
+            )
         if not specs[requested].supports(language):
             raise ProviderConfigError(f"{specs[requested].label} does not support language '{language}'")
         return requested
@@ -198,7 +226,7 @@ def resolve(kind: str, requested: str | None = None, *, language: str | None = N
         if pid in seen:
             continue
         seen.add(pid)
-        if is_configured(kind, pid) and specs[pid].supports(language):
+        if is_configured(kind, pid) and specs[pid].supports(language) and (not require_auto or specs[pid].auto_language):
             if env_default and pid != env_default:
                 logger.info("%s default '%s' unavailable; using '%s'", kind, env_default, pid)
             return pid
@@ -208,6 +236,11 @@ def resolve(kind: str, requested: str | None = None, *, language: str | None = N
         "llm": "GEMINI_API_KEY or GROQ_API_KEY",
         "translator": "GEMINI_API_KEY, GROQ_API_KEY, AZURE_TRANSLATOR_KEY or MINIMAX_API_KEY",
     }[kind]
+    if require_auto:
+        raise ProviderConfigError(
+            "Auto-detecting the spoken language needs Soniox or Deepgram - add SONIOX_API_KEY or "
+            "DEEPGRAM_API_KEY to backend/.env, or pick the language the others speak"
+        )
     lang_note = f" for language '{language}'" if language else ""
     raise ProviderConfigError(f"No {kind.upper()} provider is configured{lang_note}. Add {hint} to backend/.env")
 

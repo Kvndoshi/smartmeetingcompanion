@@ -6,11 +6,12 @@ The standalone diagram is in [architecture.mmd](architecture.mmd).
 
 | Piece | File(s) | Role |
 |---|---|---|
-| Popup | `extension/src/popup/` | Modes (translate / notes / my mic), languages, provider pickers, output device, Start/Stop, Memories search |
+| Popup | `extension/src/popup/` | My language; **What I hear** (They speak, original-voice level), **What they hear** (Others hear me in, Translate my voice), **Take notes** (my mic); provider pickers, output device, Start/Stop, Memories search |
 | Side panel | `extension/src/sidepanel/` | Live transcript, Summary, Ask (chat), Meetings history. Reads and writes through the REST API, plus live broadcasts |
 | Service worker | `extension/src/background.ts` | Owns the backend WebSockets and session state (mirrored to `chrome.storage.session`). Broadcasts `target:"ui"` messages |
-| Offscreen document | `extension/src/offscreen/offscreen.ts` | `tabCapture` and optional `getUserMedia` mic → 16 kHz Int16 PCM. Plays translated WAVs. Passthrough of the original audio |
-| Meet widget, bridge and interceptor | `extension/src/content/meet-*.ts` | Floating controls on Meet. Outgoing voice translation by swapping Meet's mic track for the translated stream |
+| Offscreen document | `extension/src/offscreen/offscreen.ts` | `tabCapture` and optional `getUserMedia` mic → 16 kHz Int16 PCM. Plays translated WAVs. Plays the original audio through a gain node: full, quiet or muted, and ducked while a translation plays |
+| Meet widget, bridge and interceptor | `extension/src/content/meet-*.ts` | Floating controls on Meet (same three groups as the popup). Outgoing voice translation by swapping Meet's mic track for a stream that carries the translation, or your own voice when no translation is needed |
+| Room-language estimator | `extension/src/shared/roomLanguage.ts` | Pure function behind "Auto — match the room": picks the language most of the room speaks from recent tab segments |
 | Live session | `backend/services/session.py` | One per WebSocket: STT → optional translation → optional TTS. Stores final segments |
 | Provider registry | `backend/services/providers/registry.py` | Capability matrix, key detection, defaults, validation |
 | Meeting store | `backend/services/meeting_store.py` | SQLite tables `meetings`, `segments` and `chat_messages`, plus an FTS5 index |
@@ -31,17 +32,17 @@ sequenceDiagram
     participant LLM as Gemini / Groq
     participant SM as Supermemory
 
-    UI->>SW: start-capture {modes, languages, providers, includeMic}
-    SW->>OFS: start-capture {streamId, passthrough}
-    SW->>WS: config {mode, source:"tab", meeting_id?}
-    WS-->>SW: session {meeting_id, providers, diarization}
+    UI->>SW: start-capture {modes, sourceLang ("auto" or a code), targetLang, providers, includeMic, originalAudio}
+    SW->>OFS: start-capture {streamId, originalLevel, duckLevel}
+    SW->>WS: config {mode, source:"tab", source_lang, target_lang, meeting_id?}
+    WS-->>SW: session {meeting_id, providers, diarization, source_lang, target_lang, auto_language}
     loop audio
         OFS->>SW: audio-data (PCM)
         SW->>WS: binary PCM (buffered until the session ack)
         WS->>P: stream audio
         P-->>WS: transcript (speaker) / translation
         WS->>DB: final segment
-        WS-->>SW: transcript {segment_id, speaker}, translated_text
+        WS-->>SW: transcript {segment_id, speaker, language}, translated_text {language}
         WS-->>SW: binary WAV (TTS)
         SW->>OFS: translated-audio
         SW-->>UI: broadcast transcript / translation / state
@@ -57,7 +58,23 @@ sequenceDiagram
 - **On Meet, the notes follow Meet's mute.** The interceptor reports whether your voice is actually reaching the call. While it isn't (muted, not joined yet, or left), the service worker sends silence on the mic socket, so muted speech never enters the notes.
   - Signals checked: Meet's mute button, a sender Meet set to `null`, and a disabled or stopped mic track.
   - "Unknown" never silences the notes.
-- **Outgoing translation (Meet only).** The interceptor patches `addTrack`, `addTransceiver` and `replaceTrack` and streams your mic PCM over a port to a third socket. That socket translates your speech into the meeting language. The translated WAVs play into a `MediaStreamDestination` whose track Meet sends to the other participants. When notes are on, this socket also transcribes you into the meeting, and the notes mic pauses.
+- **Auto-detected languages (What I hear).** With `source_lang:"auto"` the backend turns on the STT provider's language identification: Soniox `enable_language_identification`, or Deepgram `language=multi`.
+  - Every transcript and translation carries the detected `language`, which is stored on the segment.
+  - Speech already in the listener's language is neither translated nor spoken.
+  - Soniox splits an utterance when the language changes at a sentence end.
+  - Text translators get the detected language, or translate from "any language" when none is known.
+  - Output equal to the input is dropped as an echo.
+- **Original audio level.** The offscreen document routes the tab through a gain node.
+  - Notes only, or no TTS voice: full volume.
+  - Fixed source language: quiet (0.15) or muted.
+  - Auto-detect: full volume, dropping to the quiet or muted level for 2.5 s after any speech in another language.
+  - While a translation plays, always quiet or muted, with a 600 ms release.
+- **Outgoing translation (Meet only).** The interceptor patches `addTrack`, `addTransceiver` and `replaceTrack` and streams your mic PCM over a port to a third socket.
+  - That socket translates from **My language** into the effective outgoing language, `outgoingLang`. It is the chosen **Others hear me in** language. With **Auto — match the room** it is the fixed **They speak** language, or else the room estimator's pick from the other participants' detected languages.
+  - The translated WAVs play into a `MediaStreamDestination` whose track Meet sends to the other participants.
+  - When `outgoingLang` is null (it's your own language, or the room language is unknown), the service worker sends `interpreter-mix {mic:true}`. The interceptor then mixes your real mic into the same track, and the backend socket is re-configured to transcribe-only. Your voice comes back only after queued translated speech has finished.
+  - A language change re-sends `config` on the open socket, and the backend re-configures in place, keeping `meeting_id`. There is no reconnect or `replaceTrack` churn.
+  - When notes are on, this socket also transcribes you into the meeting, and the notes mic pauses.
 - **Resilience:**
   - Audio is sent continuously, silence included. It is buffered (up to 15 s) until the backend acks the config.
   - A 20 s ping keeps the MV3 service worker alive.
@@ -68,9 +85,9 @@ sequenceDiagram
 
 | Direction | Message |
 |---|---|
-| client → server | `{"type":"config", source_lang, target_lang, mode:{translate, transcribe}, source:"tab"\|"mic", meeting_id?, tab_url?, tab_title?, stt_provider?, tts_provider?, translator?}` |
+| client → server | `{"type":"config", source_lang ("auto" = detect), target_lang, mode:{translate, transcribe}, source:"tab"\|"mic", meeting_id?, tab_url?, tab_title?, stt_provider?, tts_provider?, translator?}`. Sending it again on an open socket re-configures the session in place. `target_lang` equal to `source_lang` means transcribe only |
 | client → server | binary 16 kHz mono Int16 PCM; `{"type":"ping"}`; `{"type":"stop", end_meeting?}` (what the extension sends); `{"type":"end_meeting"}` (ends the meeting without closing STT) |
-| server → client | `session` (meeting id, chosen providers, diarization), `transcript` (`text`, `is_final`, `speaker`, `source`, `segment_id`, `start_ms`), `translated_text_partial`, `translated_text`, binary WAV, `status` (`reconnecting` while the STT provider reconnects), `warning`, `error` (`code`: `provider_config`, …), `stopped`, `meeting_ended`, `pong` |
+| server → client | `session` (meeting id, chosen providers, diarization, `source_lang`, `target_lang`, `auto_language`), `transcript` (`text`, `is_final`, `speaker`, `source`, `segment_id`, `start_ms`, `language`), `translated_text_partial` and `translated_text` (with `language`), binary WAV, `status` (`reconnecting` while the STT provider reconnects), `warning`, `error` (`code`: `provider_config`, …), `stopped`, `meeting_ended`, `pong` |
 
 The types live in `extension/src/shared/protocol.ts`, kept in sync with `backend/services/session.py`.
 

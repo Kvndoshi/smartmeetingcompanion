@@ -2,7 +2,7 @@
 
 Distill is a local-first meeting companion: a Chrome/Edge extension plus a FastAPI backend. It works with any meeting or video that plays in a browser tab: Google Meet, Microsoft Teams (web), Zoom (web client), Webex or YouTube. It can:
 
-- **Translate live.** You hear other participants in your language. On Google Meet, other participants can also hear *you* translated.
+- **Translate live, both ways.** You hear every other participant in your language, whatever language each of them speaks (auto-detect). On Google Meet, the others can also hear *you* translated.
 - **Transcribe.** You get a live, speaker-labelled transcript, and you can add your own microphone.
 - **Summarize.** You get an overview, decisions, action items (with owner and due date), open questions, topics and next steps. This is written automatically when the meeting ends, or on demand.
 - **Chat with your meetings.** Ask questions about one meeting, or search across all of them using Supermemory.
@@ -21,7 +21,7 @@ meeting tab ──tabCapture──▶ offscreen doc ──16 kHz PCM──▶ se
 ```
 
 - Incoming translation and transcription use `chrome.tabCapture`, not WebRTC, so they work on any tab.
-- Outgoing translation ("Translate my voice") is Meet-only. It intercepts Meet's `RTCPeerConnection` mic track and replaces it with the translated audio.
+- Outgoing translation ("Translate my voice") is Meet-only. It intercepts Meet's `RTCPeerConnection` mic track and replaces it with the translated audio, or with your own voice while no translation is needed.
 - The local SQLite store is the live record of each transcript. Supermemory is the long-term memory used for "all meetings" chat.
 
 See [architecture.md](architecture.md) for the full design and protocol.
@@ -32,13 +32,19 @@ Add a key for any provider and it becomes available. If you don't choose one, Di
 
 | Capability | Providers (default order) |
 |---|---|
-| Speech-to-text | **Soniox** (diarization + native translation) → **Deepgram** (diarization) → Speechmatics (native translation) → Azure Speech (translation, or `azure_diarize` for speakers) |
+| Speech-to-text | **Soniox** (diarization + native translation + language auto-detect) → **Deepgram** (diarization + language auto-detect) → Speechmatics (native translation) → Azure Speech (translation, or `azure_diarize` for speakers) |
 | Text-to-speech | Soniox → Azure Neural TTS → Deepgram → MiniMax → Speechmatics (preview, English only) |
 | LLM (summaries, chat, text translation) | **Gemini** → **Groq** (both through their OpenAI-compatible APIs) |
 | Text translation (for STT providers without native translation) | LLM → Azure Translator → MiniMax |
 | Memory | **Supermemory** (one document per meeting, upserted) |
 
 You can override the defaults with `STT_PROVIDER`, `TTS_PROVIDER`, `LLM_PROVIDER` and `TRANSLATION_PROVIDER` in `backend/.env`, or per session in the popup.
+
+**Languages.**
+- The 16 original languages: English, Spanish, French, German, Italian, Portuguese, Japanese, Korean, Chinese, Hindi, Arabic, Russian, Dutch, Swedish, Polish and Turkish.
+- Indian languages added: Gujarati, Bengali, Tamil, Telugu, Marathi, Urdu, Punjabi, Kannada and Malayalam.
+- **Auto-detect** ("They speak: Auto-detect") needs Soniox or Deepgram. Soniox covers every language above. Deepgram's multilingual mode doesn't cover Urdu, Malayalam or Punjabi.
+- Voices for the Indian languages come from Soniox, Azure or Deepgram. Deepgram has no Malayalam, Punjabi or Arabic voice, and MiniMax only covers the original 16.
 
 ## Quick start
 
@@ -72,30 +78,52 @@ Then open `chrome://extensions` (or `edge://extensions`), turn on **Developer mo
 ### 3. Use it
 
 1. Open your meeting tab and click the Distill toolbar icon.
-2. Pick the modes you want:
-   - **Translate audio**: hear the meeting translated.
-   - **Take notes**: get the transcript, summary and chat. Notes contain everything said in the meeting:
+2. Set **My language**: the language you speak and want to hear.
+3. Turn on what you want. Each direction has its own colour-coded card:
+   - 🎧 **What I hear** (blue): everyone else, translated into My language. **They speak** is **Auto-detect** by default, so each speaker's language is detected on the fly. Anyone already speaking your language is heard as-is, not translated. **Keep original voices quietly underneath** leaves the real voices at low volume under the translation; untick it to mute them.
+   - 🎤 **What they hear** (purple, Google Meet only): your voice, translated for everyone in the call. Pick **Others hear me in**, or **Auto — match the room**, then press **Translate my voice**. This card has its own button, independent of Start. You can change the language while it runs. See [Two-way and multi-language calls](#two-way-and-multi-language-calls).
+   - 📝 **Take notes** (green): get the transcript, summary and chat. Notes contain everything said in the meeting:
      - The other participants come from the tab audio.
      - You come from your microphone. **Include my microphone** is on by default, because the meeting tab never plays your own voice back.
      - The first time you press Start, a one-time "Allow microphone" page opens next to the meeting. Your voice joins the notes as soon as you allow it.
      - On Google Meet, the notes follow Meet's mute: nothing you say while muted, or before joining the call, is transcribed.
-3. Choose languages and, optionally, providers. Then press **Start**. The notes side panel opens with the live transcript.
-4. The side panel has four tabs:
-   - **Live**: the transcript. You can rename speakers and type your own notes.
+4. Optionally choose providers. Then press **Start**. The notes side panel opens with the live transcript.
+5. The side panel has four tabs:
+   - **Live**: the transcript. You can rename speakers and type your own notes. A small tag (e.g. `GU`) marks lines spoken in a language other than yours.
    - **Summary**: generate or regenerate the summary, pick its language, copy or download it as Markdown, and sync it to Supermemory.
    - **Ask**: chat about this meeting or all meetings.
    - **Meetings**: history, full-text search and delete.
-5. **Stop & summarize** ends the meeting. The summary appears automatically if an LLM key is set.
+6. **Stop & summarize** ends the meeting. The summary appears automatically if an LLM key is set.
 
-On Google Meet, a floating widget also offers Start/Stop, **Translate my voice** and **Open notes panel**. Chrome only allows tab capture after you've clicked the toolbar icon on that tab, so if Start fails from the widget, start from the popup once.
+On Google Meet, a floating widget shows the same three groups in compact form: My language, **What I hear** (with Start/Stop), **What they hear** (with **Translate my voice**), plus **Open notes panel**. Chrome only allows tab capture after you've clicked the toolbar icon on that tab, so if Start fails from the widget, start from the popup once.
 
-**Audio routing.** In translate mode the tab is muted and only the translation plays, through the output device selected in the popup. To feed translated audio into another app, use a virtual device such as BlackHole or VB-Cable. In notes-only mode, or when no TTS voice is available, the original audio stays audible.
+**Audio routing.** Translated audio plays through the output device selected in the popup. The original meeting audio plays through the system default output. To feed translated audio into another app, use a virtual device such as BlackHole or VB-Cable.
+- With a fixed **They speak** language, the original voices are kept quiet (about 15%) or muted.
+- With **Auto-detect**, the original stays at full volume and drops while someone speaks another language, so people who already speak your language sound normal.
+- The original always drops while a translation is playing. In notes-only mode, or when no TTS voice is available, it stays at full volume.
+
+## Two-way and multi-language calls
+
+**One rule shapes everything: each person in a Meet call sends one audio stream to everyone.** So your outgoing voice can be in only one language at a time, while what you *hear* can come from any number of languages.
+
+**Everyone uses Distill (the universal mode, any number of languages).** Example: Asha speaks Hindi, Bhavin speaks Gujarati and Chris speaks English.
+- Each person sets **My language** to their own language, and **They speak** to **Auto-detect**.
+- Each person turns on **What I hear** and leaves **Translate my voice** off.
+- Everyone talks normally. Each person's Distill detects who is speaking which language and translates it into that person's own language. Bhavin hears Asha and Chris in Gujarati, Asha hears both of them in Hindi, and Chris hears both in English.
+- Nobody's outgoing voice is changed. That's why voice translation stays off: every listener translates for themselves.
+
+**Only you use Distill.**
+- **What I hear** with Auto-detect still translates everyone into your language.
+- **What they hear** sends your voice in one language. Pick it, or choose **Auto — match the room**. Auto follows the language most of the room speaks, detected from the other participants' speech over the last few minutes. It waits for a clear majority and doesn't flip on one stray sentence. While the room speaks your language, the others hear your own voice.
+- If two other people speak two different languages, one of them won't understand your translated voice. Ask them to install Distill, or pick the language most of them share.
+
+**Use headphones** for two-way translation. Otherwise your microphone picks up the translated voices from your speakers.
 
 ## Testing
 
 ```bash
 cd backend
-uv run pytest -q                              # 125 tests, zero API keys needed (fakes + E2E dry run)
+uv run pytest -q                              # 148 tests, zero API keys needed (fakes + E2E dry run)
 uv run python scripts/smoke_providers.py      # live check of every provider that has a key
 uv run python scripts/e2e_meeting.py          # charter criteria against a 5-min generated meeting
 ```
@@ -108,7 +136,12 @@ uv run python scripts/e2e_meeting.py          # charter criteria against a 5-min
   - English → Spanish/French speech-to-speech.
 - It writes a report to `backend/reports/`.
 
-See [TESTING.md](TESTING.md) for the manual Chrome/Edge checklist.
+```bash
+cd extension
+npm test                                      # room-language estimator unit tests (Node 24, no extra deps)
+```
+
+See [TESTING.md](TESTING.md) for the Meet interceptor browser test page and the manual Chrome/Edge checklist.
 
 ## Project layout
 
@@ -127,5 +160,6 @@ See [TESTING.md](TESTING.md) for the manual Chrome/Edge checklist.
   - `src/sidepanel/`: the notes panel.
   - `src/popup/`.
   - `src/content/meet-*`: the Meet widget and outgoing translation.
-  - `src/shared/`: protocol, API client and hooks.
+  - `src/shared/`: protocol, API client, hooks and the room-language estimator.
+  - `tests/`: unit tests and the interceptor browser test page.
 - `web/`: legacy prototype, not part of the current setup.

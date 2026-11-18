@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDebouncedCallback } from "../shared/hooks";
 import { formatTimestamp, speakerLabel, type Meeting, type Segment, type SessionState, type Source } from "../shared/protocol";
+import { langName, langShort, sameLanguage } from "../utils/languages";
 import type { LivePartial } from "./App";
 
 interface Props {
@@ -117,6 +118,7 @@ export default function LiveTab({ meeting, segments, partials, isLive, session, 
   };
 
   const providers = isLive ? session?.activeProviders : null;
+  const myLang = session?.targetLang ?? null;
 
   return (
     <div className="live-tab">
@@ -194,12 +196,21 @@ export default function LiveTab({ meeting, segments, partials, isLive, session, 
         )}
         {segments.map((seg, i) => {
           const prev = segments[i - 1];
-          const continued = prev && prev.speaker === seg.speaker && prev.source === seg.source;
+          const lang = seg.language ?? null;
+          // A speaker switching language starts a new block so the change is visible.
+          const langChanged = !!lang && !!prev?.language && !sameLanguage(prev.language, lang);
+          const continued = prev && prev.speaker === seg.speaker && prev.source === seg.source && !langChanged;
+          const showChip = !!lang && (langChanged || !myLang || !sameLanguage(lang, myLang));
           return (
             <div key={seg.id} className={`seg ${continued ? "continued" : ""}`}>
               {!continued && (
                 <div className="seg-head">
                   <span className={`speaker-name ${speakerColorClass(seg.speaker)}`}>{speakerLabel(seg.speaker, names)}</span>
+                  {showChip && (
+                    <span className="lang-chip" title={`Spoken in ${langName(lang)}`}>
+                      {langShort(lang)}
+                    </span>
+                  )}
                   <span className="seg-time">{formatTimestamp(seg.start_ms)}</span>
                 </div>
               )}

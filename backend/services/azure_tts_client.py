@@ -40,7 +40,18 @@ _VOICE_POOL: dict[str, list[str]] = {
     "sv": ["sv-SE-MattiasNeural", "sv-SE-SofieNeural", "sv-SE-HilleviNeural"],
     "pl": ["pl-PL-MarekNeural", "pl-PL-AgnieszkaNeural", "pl-PL-ZofiaNeural"],
     "tr": ["tr-TR-AhmetNeural", "tr-TR-EmelNeural"],
-    # Languages not listed fall back to the English pool.
+    # learn.microsoft.com/azure/ai-services/speech-service/language-support?tabs=tts
+    "gu": ["gu-IN-NiranjanNeural", "gu-IN-DhwaniNeural"],
+    "bn": ["bn-IN-BashkarNeural", "bn-IN-TanishaaNeural"],
+    "ta": ["ta-IN-ValluvarNeural", "ta-IN-PallaviNeural"],
+    "te": ["te-IN-MohanNeural", "te-IN-ShrutiNeural"],
+    "mr": ["mr-IN-ManoharNeural", "mr-IN-AarohiNeural"],
+    "ur": ["ur-IN-SalmanNeural", "ur-IN-GulNeural"],
+    "pa": ["pa-IN-OjasNeural", "pa-IN-VaaniNeural"],
+    "kn": ["kn-IN-GaganNeural", "kn-IN-SapnaNeural"],
+    "ml": ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural"],
+    # Languages not listed raise, so the session tries the next TTS provider
+    # instead of reading another language with an English voice.
 }
 
 # Gender-mapped defaults (used when speaker_id is None)
@@ -78,6 +89,11 @@ _GENDER_DEFAULTS: dict[tuple[str, str], str] = {
     ("tr", "male"): "tr-TR-AhmetNeural",
     ("tr", "female"): "tr-TR-EmelNeural",
 }
+for _lang, _pool in _VOICE_POOL.items():
+    # Pools added later list [male, female]; keep explicit entries above.
+    if len(_pool) == 2:
+        _GENDER_DEFAULTS.setdefault((_lang, "male"), _pool[0])
+        _GENDER_DEFAULTS.setdefault((_lang, "female"), _pool[1])
 
 
 class AzureTtsClient:
@@ -105,9 +121,12 @@ class AzureTtsClient:
             if override:
                 return override
 
+        if lang not in _VOICE_POOL and not os.getenv(f"AZURE_TTS_VOICE_{lang.upper()}_FEMALE", "").strip():
+            raise ValueError(f"Azure TTS has no voice configured for language '{lang}'")
+
         # Speaker rotation from the pool (takes priority over gender when speaker is known)
         if speaker_id and speaker_id.isdigit():
-            pool = _VOICE_POOL.get(lang, _VOICE_POOL["en"])
+            pool = _VOICE_POOL[lang] if lang in _VOICE_POOL else [os.getenv(f"AZURE_TTS_VOICE_{lang.upper()}_FEMALE", "").strip()]
             idx = (int(speaker_id) - 1) % len(pool)
             return pool[idx]
 
@@ -127,10 +146,8 @@ class AzureTtsClient:
         voice = _GENDER_DEFAULTS.get((lang, gender))
         if voice:
             return voice
-
-        # Unknown language — use English pool
-        pool = _VOICE_POOL["en"]
-        return pool[0] if gender == "male" else pool[1]
+        pool = _VOICE_POOL.get(lang) or [os.getenv(f"AZURE_TTS_VOICE_{lang.upper()}_FEMALE", "").strip()]
+        return pool[0]
 
     async def text_to_speech_streaming(
         self,

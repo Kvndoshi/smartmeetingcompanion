@@ -43,6 +43,15 @@ _SOURCE_LOCALE_MAP: dict[str, str] = {
     "sv": "sv-SE",
     "pl": "pl-PL",
     "tr": "tr-TR",
+    "gu": "gu-IN",
+    "bn": "bn-IN",
+    "ta": "ta-IN",
+    "te": "te-IN",
+    "mr": "mr-IN",
+    "ur": "ur-IN",
+    "pa": "pa-IN",
+    "kn": "kn-IN",
+    "ml": "ml-IN",
 }
 
 _TARGET_LANG_MAP: dict[str, str] = {code: code for code in _SOURCE_LOCALE_MAP.keys()}
@@ -66,6 +75,15 @@ _SYNTHESIS_VOICES: dict[str, str] = {
     "sv": "sv-SE-SofieNeural",
     "pl": "pl-PL-AgnieszkaNeural",
     "tr": "tr-TR-EmelNeural",
+    "gu": "gu-IN-DhwaniNeural",
+    "bn": "bn-IN-TanishaaNeural",
+    "ta": "ta-IN-PallaviNeural",
+    "te": "te-IN-ShrutiNeural",
+    "mr": "mr-IN-AarohiNeural",
+    "ur": "ur-IN-GulNeural",
+    "pa": "pa-IN-VaaniNeural",
+    "kn": "kn-IN-SapnaNeural",
+    "ml": "ml-IN-SobhanaNeural",
 }
 
 

@@ -4,8 +4,8 @@ import { api } from "../shared/api";
 import { BACKEND_HTTP_URL } from "../shared/config";
 import { ext } from "../shared/ext";
 import { formatDuration, useBackendHealth, useElapsed, useSessionState, useTheme } from "../shared/hooks";
-import { speakerLabel, type Modes, type ProviderInfo, type ProvidersStatus, type Source } from "../shared/protocol";
-import { LANGUAGES } from "../utils/languages";
+import { speakerLabel, type Modes, type OriginalAudio, type ProviderInfo, type ProvidersStatus, type Source } from "../shared/protocol";
+import { AUTO, LANGUAGES, langName, langShort, sameLanguage } from "../utils/languages";
 import MemoriesTab from "./MemoriesTab";
 
 interface AudioDevice {
@@ -19,6 +19,7 @@ interface PreviewLine {
   speaker: string | null;
   text: string;
   translation: string;
+  language?: string | null;
   segmentId?: number;
 }
 
@@ -64,6 +65,41 @@ const SpeakerIcon = () => (
     <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
   </svg>
 );
+
+const HeadphonesIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+    <path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z" />
+  </svg>
+);
+
+const MicIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8" />
+  </svg>
+);
+
+const NotesIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6M8 13h8M8 17h5" />
+  </svg>
+);
+
+const MEET_URL = /^https:\/\/meet\.google\.com\//i;
+
+function LangOptions({ exclude }: { exclude?: string }) {
+  return (
+    <>
+      {LANGUAGES.filter((l) => l.code !== exclude).map((l) => (
+        <option key={l.code} value={l.code}>
+          {l.name}
+        </option>
+      ))}
+    </>
+  );
+}
 
 const RefreshIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -115,8 +151,13 @@ export default function App() {
   const { online, recheck } = useBackendHealth();
 
   const [activeTab, setActiveTab] = useState<PopupTab>("session");
-  const [sourceLang, setSourceLang] = useState("en");
-  const [targetLang, setTargetLang] = useState("es");
+  // targetLang = My language (I speak it and want to hear it); sourceLang = They speak ("auto" = detect).
+  const [sourceLang, setSourceLang] = useState(AUTO);
+  const [targetLang, setTargetLang] = useState("en");
+  // Others hear me in ("auto" = match the room).
+  const [speakLang, setSpeakLang] = useState(AUTO);
+  const [originalAudio, setOriginalAudio] = useState<OriginalAudio>("quiet");
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const [modes, setModes] = useState<Modes>({ translate: true, notes: true });
   // On by default: your own voice is part of the meeting (Meet never plays it back in the tab).
   const [includeMic, setIncludeMic] = useState(true);
@@ -147,15 +188,21 @@ export default function App() {
       .storageGet<{
         sourceLang: string;
         targetLang: string;
+        speakLang: string;
+        originalAudio: OriginalAudio;
         outputDeviceId: string;
         modes: Modes;
         includeMic: boolean;
         sttProvider: string;
         ttsProvider: string;
-      }>(["sourceLang", "targetLang", "outputDeviceId", "modes", "includeMic", "sttProvider", "ttsProvider"])
+      }>(["sourceLang", "targetLang", "speakLang", "originalAudio", "outputDeviceId", "modes", "includeMic", "sttProvider", "ttsProvider"])
       .then((d) => {
         if (d.sourceLang) setSourceLang(d.sourceLang);
         if (d.targetLang) setTargetLang(d.targetLang);
+        // Before "Others hear me in" existed, voice translation used the meeting language.
+        const savedSpeak = d.speakLang || (d.sourceLang && d.sourceLang !== AUTO ? d.sourceLang : AUTO);
+        setSpeakLang(sameLanguage(savedSpeak, d.targetLang || "en") ? AUTO : savedSpeak);
+        if (d.originalAudio === "muted" || d.originalAudio === "quiet") setOriginalAudio(d.originalAudio);
         if (d.modes && typeof d.modes.translate === "boolean") setModes(d.modes);
         if (typeof d.includeMic === "boolean") setIncludeMic(d.includeMic);
         if (typeof d.sttProvider === "string") setSttProvider(d.sttProvider);
@@ -195,6 +242,7 @@ export default function App() {
           setPartial({ source: msg.source, speaker: msg.speaker, text: msg.text });
           return;
         }
+        const language = msg.language;
         setPartial(null);
         setLines((prev) => {
           if (msg.segmentId && prev.some((l) => l.segmentId === msg.segmentId)) return prev;
@@ -204,6 +252,7 @@ export default function App() {
             speaker: msg.speaker,
             text: msg.text,
             translation: "",
+            language,
             segmentId: msg.segmentId,
           };
           return [...prev, line].slice(-MAX_PREVIEW_LINES);
@@ -328,6 +377,7 @@ export default function App() {
       includeMic: modes.notes && includeMic,
       sttProvider: sttProvider || null,
       ttsProvider: modes.translate ? ttsProvider || null : null,
+      originalAudio,
       tabId: targetTab?.id,
     });
     if (modes.notes) openPanel();
@@ -348,10 +398,21 @@ export default function App() {
     if (!res.success) setErrorMsg(res.error || "Failed to stop");
   };
 
-  const handleSwap = () => {
-    setSourceLang(targetLang);
-    setTargetLang(sourceLang);
-    persist({ sourceLang: targetLang, targetLang: sourceLang });
+  // ── What they hear (your voice, Meet only) ──
+  const toggleVoice = async () => {
+    setErrorMsg("");
+    setVoiceBusy(true);
+    const res = session?.isMicTranslating
+      ? await ext.send({ type: "stop-mic-translation", target: "background" })
+      : await ext.send({ type: "start-mic-translation", target: "background", myLang: targetLang, speakLang, tabId: targetTab?.id });
+    setVoiceBusy(false);
+    if (!res.success) setErrorMsg(res.error || "Voice translation failed");
+  };
+
+  const changeSpeakLang = (value: string) => {
+    setSpeakLang(value);
+    persist({ speakLang: value });
+    if (session?.isMicTranslating) void ext.send({ type: "set-speak-language", target: "background", speakLang: value });
   };
 
   // ── Derived UI state ──
@@ -360,6 +421,13 @@ export default function App() {
   const llmConfigured = providers ? providers.llm.providers.some((p) => p.configured) : true;
   const tabCapturable = isCapturableUrl(targetTab?.url);
   const noMode = !modes.translate && !modes.notes;
+  const isMeetTab = MEET_URL.test(targetTab?.url || "") || (!!session?.isMicTranslating && session.tabId === targetTab?.id);
+  // Auto-detect needs an STT provider that identifies languages (Soniox, Deepgram).
+  const autoCapable = !providers
+    ? true
+    : sttProvider
+      ? !!providers.stt.providers.find((p) => p.id === sttProvider)?.auto_language
+      : providers.stt.providers.some((p) => p.configured && p.auto_language);
 
   const startBlocker =
     online === false
@@ -367,10 +435,12 @@ export default function App() {
       : !sttConfigured
         ? "Add a speech-to-text key in Settings"
         : noMode
-          ? "Pick Translate audio and/or Take notes"
+          ? "Turn on What I hear and/or Take notes"
           : !tabCapturable
             ? "Open your meeting tab, then click Distill"
-            : "";
+            : sourceLang === AUTO && !autoCapable
+              ? "Pick the language they speak"
+              : "";
 
   const statusText = (() => {
     if (!session) return "Ready";
@@ -396,6 +466,27 @@ export default function App() {
 
   const selectedDeviceLabel = outputDevices.find((d) => d.deviceId === selectedDevice)?.label ?? "";
   const editable = !isCapturing && !isStarting;
+  const voiceOn = !!session?.isMicTranslating;
+  const myLangName = langName(targetLang);
+
+  const voiceStatus = (() => {
+    if (!session) return { dot: "", text: "" };
+    switch (session.outgoingStatus) {
+      case "starting":
+        return { dot: "starting", text: "Connecting your voice…" };
+      case "error":
+        return { dot: "error", text: "Voice translation stopped — see the message above" };
+      case "on":
+        if (session.outgoingLang) return { dot: "on", text: `Others hear you in ${langName(session.outgoingLang)}` };
+        if (session.speakLang === AUTO && !session.isCapturing)
+          return { dot: "on", text: "Others hear your own voice — press Start so Distill can hear which language the room speaks" };
+        if (session.speakLang === AUTO)
+          return { dot: "on", text: `Others hear your own voice — the room speaks ${myLangName} or hasn't said enough yet` };
+        return { dot: "on", text: "Others hear your own voice" };
+      default:
+        return { dot: "", text: "" };
+    }
+  })();
   const sttInfo = providers?.stt.providers.find((p) => p.id === (sttProvider || providers.stt.default));
 
   return (
@@ -471,83 +562,162 @@ export default function App() {
 
         {activeTab === "session" ? (
           <>
-            <div className="mode-grid">
-              <label className={`mode-card ${modes.translate ? "on" : ""}`}>
+            <label className="my-lang">
+              <span className="section-label">My language — I speak it and want to hear it</span>
+              <select
+                className="lang-select boxed"
+                value={targetLang}
+                onChange={(e) => {
+                  setTargetLang(e.target.value);
+                  persist({ targetLang: e.target.value });
+                  // "Others hear me in" never offers my own language.
+                  if (sameLanguage(speakLang, e.target.value)) changeSpeakLang(AUTO);
+                }}
+                disabled={!editable || voiceOn}
+                aria-label="My language"
+              >
+                <LangOptions />
+              </select>
+            </label>
+
+            {/* 🎧 What I hear — everyone else, translated into my language */}
+            <div className={`dir-card hear ${modes.translate ? "on" : ""}`}>
+              <label className="dir-head">
+                <span className="dir-icon">
+                  <HeadphonesIcon />
+                </span>
+                <span className="dir-text">
+                  <span className="dir-title">What I hear</span>
+                  <span className="dir-sub">Translate everyone else into {myLangName}</span>
+                </span>
                 <input
                   type="checkbox"
+                  className="dir-toggle"
                   checked={modes.translate}
                   onChange={(e) => setMode("translate", e.target.checked)}
                   disabled={!editable}
+                  aria-label="Translate what I hear"
                 />
-                <span className="mode-title">Translate audio</span>
-                <span className="mode-desc">Hear the meeting in your language</span>
               </label>
-              <label className={`mode-card ${modes.notes ? "on" : ""}`}>
-                <input type="checkbox" checked={modes.notes} onChange={(e) => setMode("notes", e.target.checked)} disabled={!editable} />
-                <span className="mode-title">Take notes</span>
-                <span className="mode-desc">Transcript, summary &amp; chat</span>
+              <label className="field-row">
+                <span>They speak</span>
+                <select
+                  className="lang-select boxed"
+                  value={sourceLang}
+                  onChange={(e) => {
+                    setSourceLang(e.target.value);
+                    persist({ sourceLang: e.target.value });
+                  }}
+                  disabled={!editable}
+                  aria-label="They speak"
+                >
+                  <option value={AUTO}>Auto-detect (any language)</option>
+                  <LangOptions />
+                </select>
               </label>
-            </div>
-
-            {modes.notes && (
-              <label className="check-row">
-                <input type="checkbox" checked={includeMic} onChange={(e) => toggleIncludeMic(e.target.checked)} disabled={!editable} />
-                <span>Include my microphone in the notes</span>
-                {includeMic && micPermission !== "granted" && (
-                  <button type="button" className="link-btn" onClick={() => ext.openTab(PERMISSIONS_PAGE, targetTab?.id)}>
-                    Allow
-                  </button>
-                )}
-              </label>
-            )}
-
-            <div>
-              <div className="section-label">{modes.translate ? "Languages" : "Meeting language"}</div>
-              <div className="lang-section" style={{ marginTop: 6 }}>
-                <div className="lang-group">
-                  <select
-                    className="lang-select"
-                    value={sourceLang}
+              {modes.translate && (
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={originalAudio === "quiet"}
                     onChange={(e) => {
-                      setSourceLang(e.target.value);
-                      persist({ sourceLang: e.target.value });
+                      const next: OriginalAudio = e.target.checked ? "quiet" : "muted";
+                      setOriginalAudio(next);
+                      persist({ originalAudio: next });
                     }}
                     disabled={!editable}
-                    aria-label="Spoken language"
-                  >
-                    {LANGUAGES.map((l) => (
-                      <option key={l.code} value={l.code}>
-                        {l.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
+                  <span>Keep original voices quietly underneath</span>
+                </label>
+              )}
+              {sourceLang === AUTO && (
+                <div className="device-hint">
+                  Each speaker's language is detected; anyone already speaking {myLangName} is heard as-is.
                 </div>
-                {modes.translate && (
-                  <>
-                    <button className="lang-swap" onClick={handleSwap} disabled={!editable} title="Swap languages" type="button">
-                      <span>⇄</span>
-                    </button>
-                    <div className="lang-group">
-                      <select
-                        className="lang-select"
-                        value={targetLang}
-                        onChange={(e) => {
-                          setTargetLang(e.target.value);
-                          persist({ targetLang: e.target.value });
-                        }}
-                        disabled={!editable}
-                        aria-label="Translate to"
-                      >
-                        {LANGUAGES.map((l) => (
-                          <option key={l.code} value={l.code}>
-                            {l.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </>
-                )}
+              )}
+              {sourceLang === AUTO && !autoCapable && (
+                <div className="device-hint warning">Auto-detect needs Soniox or Deepgram — pick the language they speak, or switch provider.</div>
+              )}
+            </div>
+
+            {/* 🎤 What they hear — my voice, translated for the others (Meet only) */}
+            <div className={`dir-card speak ${voiceOn ? "on" : ""}`}>
+              <div className="dir-head">
+                <span className="dir-icon">
+                  <MicIcon />
+                </span>
+                <span className="dir-text">
+                  <span className="dir-title">What they hear</span>
+                  <span className="dir-sub">Your voice, translated for everyone in the call · Google Meet</span>
+                </span>
               </div>
+              <label className="field-row">
+                <span>Others hear me in</span>
+                <select
+                  className="lang-select boxed"
+                  value={speakLang}
+                  onChange={(e) => changeSpeakLang(e.target.value)}
+                  disabled={voiceBusy}
+                  aria-label="Others hear me in"
+                >
+                  <option value={AUTO}>Auto — match the room</option>
+                  <LangOptions exclude={targetLang} />
+                </select>
+              </label>
+              <button
+                type="button"
+                className={`dir-btn ${voiceOn ? "active" : ""}`}
+                onClick={() => void toggleVoice()}
+                disabled={voiceBusy || (!voiceOn && (!isMeetTab || online === false))}
+              >
+                <MicIcon />
+                {voiceOn ? "Stop — others hear my own voice" : "Translate my voice"}
+              </button>
+              {voiceStatus.text && (
+                <div className="dir-status">
+                  <span className={`dot ${voiceStatus.dot}`} />
+                  <span>{voiceStatus.text}</span>
+                </div>
+              )}
+              {!voiceOn && !isMeetTab && <div className="device-hint">Works in Google Meet — open your Meet call tab.</div>}
+              {!voiceOn && isMeetTab && (
+                <div className="device-hint">
+                  One language at a time: everyone hears the same voice. Use headphones. If the others run Distill too, leave this off — they hear
+                  you in their own language.
+                </div>
+              )}
+            </div>
+
+            {/* 📝 Notes */}
+            <div className={`dir-card notes ${modes.notes ? "on" : ""}`}>
+              <label className="dir-head">
+                <span className="dir-icon">
+                  <NotesIcon />
+                </span>
+                <span className="dir-text">
+                  <span className="dir-title">Take notes</span>
+                  <span className="dir-sub">Transcript, summary &amp; chat</span>
+                </span>
+                <input
+                  type="checkbox"
+                  className="dir-toggle"
+                  checked={modes.notes}
+                  onChange={(e) => setMode("notes", e.target.checked)}
+                  disabled={!editable}
+                  aria-label="Take notes"
+                />
+              </label>
+              {modes.notes && (
+                <label className="check-row">
+                  <input type="checkbox" checked={includeMic} onChange={(e) => toggleIncludeMic(e.target.checked)} disabled={!editable} />
+                  <span>Include my microphone in the notes</span>
+                  {includeMic && micPermission !== "granted" && (
+                    <button type="button" className="link-btn" onClick={() => ext.openTab(PERMISSIONS_PAGE, targetTab?.id)}>
+                      Allow
+                    </button>
+                  )}
+                </label>
+              )}
             </div>
 
             {providers && (
@@ -630,7 +800,10 @@ export default function App() {
               <button className="action-btn start" onClick={handleStart} disabled={isStarting || !!startBlocker} type="button">
                 <span className="btn-content">
                   <PlayIcon />
-                  {isStarting ? "Starting…" : startBlocker || "Start"}
+                  {isStarting
+                    ? "Starting…"
+                    : startBlocker ||
+                      (modes.translate && modes.notes ? "Start — hear translated & take notes" : modes.translate ? "Start — hear translated" : "Start taking notes")}
                 </span>
               </button>
             )}
@@ -648,6 +821,7 @@ export default function App() {
                     <div key={l.key} className="transcript-entry">
                       {l.text && (
                         <div className="transcript-original">
+                          {l.language && !sameLanguage(l.language, targetLang) && <span className="lang-chip">{langShort(l.language)}</span>}
                           <b>{speakerLabel(l.source === "mic" ? "me" : l.speaker)}:</b> {l.text}
                         </div>
                       )}

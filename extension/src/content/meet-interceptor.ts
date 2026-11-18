@@ -9,6 +9,8 @@
  *   2. Captures PCM chunks and forwards them to the bridge via postMessage
  *   3. Receives translated audio back and pipes it into a replacement track
  *   4. Meet unknowingly sends the replacement track to other participants
+ *   5. "Own voice" mix (interpreter-mix, mic: true): the replacement track also
+ *      carries your real mic, for when the room already speaks your language
  *
  * NO chrome.* APIs — page context only. All comms via window.postMessage.
  * Do NOT import anything from other extension files — fully self-contained.
@@ -46,6 +48,10 @@ let micSource: MediaStreamAudioSourceNode | null = null;
 let workletNode: AudioWorkletNode | null = null;
 let destination: MediaStreamAudioDestinationNode | null = null;
 let replacementTrack: MediaStreamTrack | null = null;
+// Your real voice into the replacement track: gain 1 = others hear you (own voice),
+// 0 = they hear only the translation. Kept across pipeline rebuilds.
+let micGain: GainNode | null = null;
+let micPassthrough = false;
 
 // Mirror mute state from real track to replacement track
 let enabledObserverInterval: ReturnType<typeof setInterval> | null = null;
@@ -196,9 +202,14 @@ async function buildPipeline(track: MediaStreamTrack): Promise<void> {
 
     destination = audioCtx.createMediaStreamDestination();
 
-    // Only capture PCM from the mic; the destination (what Meet sends) carries
-    // nothing but the translated audio injected by playTranslated().
+    // PCM for the translation comes from the mic. The destination (what Meet
+    // sends) carries the translated audio injected by playTranslated(), plus your
+    // real voice only while the "own voice" mix is on.
     micSource.connect(workletNode);
+    micGain = audioCtx.createGain();
+    micGain.gain.value = micPassthrough ? 1 : 0;
+    micSource.connect(micGain);
+    micGain.connect(destination);
 
     const destTracks = destination.stream.getAudioTracks();
     if (destTracks.length === 0) {
@@ -228,6 +239,10 @@ function teardownPipeline(): void {
   if (micSource) {
     micSource.disconnect();
     micSource = null;
+  }
+  if (micGain) {
+    micGain.disconnect();
+    micGain = null;
   }
   if (destination) {
     destination.disconnect();
@@ -340,6 +355,22 @@ function playTranslated(audioBytes: number[]): void {
   } catch (err) {
     console.error('[Interceptor] PCM playback failed:', err);
   }
+}
+
+/**
+ * Own voice (true) or translation only (false). Cutting your voice is immediate;
+ * bringing it back waits for translated speech that is still queued, so the two
+ * never talk over each other.
+ */
+function setMicMix(mic: boolean): void {
+  micPassthrough = mic;
+  if (!audioCtx || !micGain) return; // applied when the pipeline is built
+  const now = audioCtx.currentTime;
+  const param = micGain.gain;
+  param.cancelScheduledValues(now);
+  param.setValueAtTime(param.value, now);
+  const at = mic ? Math.max(now, nextPlaybackTime) : now;
+  param.setTargetAtTime(mic ? 1 : 0, at, 0.02);
 }
 
 // ─── Sender bookkeeping ───────────────────────────────────────────────────────
@@ -693,6 +724,10 @@ window.addEventListener('message', (event: MessageEvent) => {
 
     case 'interpreter-mic-state-request':
       reportVoiceInCall(true);
+      break;
+
+    case 'interpreter-mix':
+      setMicMix((msg as unknown as { mic?: unknown }).mic === true);
       break;
 
     case 'interpreter-translated-audio': {

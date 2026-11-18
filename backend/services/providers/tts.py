@@ -111,6 +111,13 @@ DEEPGRAM_FLUX_VOICES = {
     "pl": "flux-bartosz-pl",
     "tr": "flux-dilek-tr",
     "sv": "flux-axel-sv",
+    "gu": "flux-bhavna-gu",
+    "bn": "flux-afsana-bn",
+    "ta": "flux-gokul-ta",
+    "te": "flux-pavan-te",
+    "mr": "flux-pooja-mr",
+    "ur": "flux-ambreen-ur",
+    "kn": "flux-manjunath-kn",
 }
 
 
